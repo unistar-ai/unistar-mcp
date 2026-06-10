@@ -37,6 +37,9 @@ jobs:
           distribution: goreleaser
           version: "~> v2"
           args: build --clean --snapshot
+      - name: "Integration Test"
+        run:
+          make integration-test
       - name: Image Build
         uses: docker/build-push-action@v7
         with:
