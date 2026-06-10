@@ -1,0 +1,5 @@
+# UniStar MCP
+
+## License
+
+MIT
