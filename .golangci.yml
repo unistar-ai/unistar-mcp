@@ -1,0 +1,91 @@
+version: "2"
+run:
+  go: "1.26"
+  tests: false
+  allow-parallel-runners: true
+linters:
+  default: none
+  enable:
+    - dupl
+    - goconst
+    - gosec
+    - govet
+    - importas
+    - ineffassign
+    - misspell
+    - nakedret
+    - prealloc
+    - revive
+    - unconvert
+    - whitespace
+  settings:
+    importas:
+      alias: []
+      no-unaliased: true
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+        - name: unexported-return
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - gosec
+        path: pkg/eks/create.go$
+        text: TLS InsecureSkipVerify set true.
+      - linters:
+          - revive
+        path: pkg/*
+        text: avoid meaningless package names
+      - linters:
+          - prealloc
+        path: pkg/*
+        text: Consider preallocating
+      - linters:
+          - goconst
+        path: pkg/*
+        text: make it a constant
+      - linters:
+          - revive
+        path: pkg/*
+        text: "unused-parameter:"
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
