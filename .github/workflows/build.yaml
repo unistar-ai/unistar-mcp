@@ -17,9 +17,9 @@ jobs:
           go-version: 1.26.x
           cache: false
       - name: Setup QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       - name: Lint
         uses: golangci/golangci-lint-action@v9
       - name: Verify
@@ -32,13 +32,13 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
           args: build --clean --snapshot
       - name: Image Build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           push: false
           build-args: |
