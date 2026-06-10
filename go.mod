@@ -6,7 +6,7 @@ require (
 	github.com/STARRY-S/simple-logrus-formatter v0.0.0-20250427025245-bdb535b56165
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2
-	golang.org/x/term v0.40.0
+	golang.org/x/term v0.44.0
 )
 
 require (
@@ -15,5 +15,5 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
-	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
 )
