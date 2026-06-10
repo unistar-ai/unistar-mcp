@@ -15,7 +15,10 @@ var (
 	Version   = "dev"
 )
 
-func SetupLogrus(hideTime bool) {
+// SetupLogrus configures logrus output. When stdio is true the process speaks
+// the MCP protocol over stdout, so ALL log levels must be routed to stderr to
+// avoid corrupting the JSON-RPC stream.
+func SetupLogrus(hideTime bool, stdio bool) {
 	formatter := &formatter.Formatter{
 		HideKeys:        false,
 		TimestampFormat: "[15:04:05]", // hour, time, sec only
@@ -40,9 +43,15 @@ func SetupLogrus(hideTime bool) {
 			logrus.WarnLevel,
 		},
 	})
+
+	// In stdio mode stdout is reserved for the MCP protocol, so info/debug/trace
+	// logs go to stderr as well; otherwise they go to stdout.
+	lowLevelWriter := os.Stdout
+	if stdio {
+		lowLevelWriter = os.Stderr
+	}
 	logrus.AddHook(&writer.Hook{
-		// Send info, debug and trace logs to stdout.
-		Writer: os.Stdout,
+		Writer: lowLevelWriter,
 		LogLevels: []logrus.Level{
 			logrus.TraceLevel,
 			logrus.InfoLevel,

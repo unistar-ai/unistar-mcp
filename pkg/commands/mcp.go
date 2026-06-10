@@ -2,6 +2,8 @@ package commands
 
 import (
 	"github.com/STARRY-S/unistar-mcp/pkg/server"
+	"github.com/STARRY-S/unistar-mcp/pkg/utils"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
@@ -29,7 +31,15 @@ func newServerCmd() *serverCmd {
 
 	cc.baseCmd = newBaseCmd(&cobra.Command{
 		Use:   "unistar-mcp",
-		Short: "Start the advanced CI Workflow MCP Helper Agent (stdio mode).",
+		Short: "Start the unistar-mcp CI workflow helper server (stdio mode).",
+		PreRun: func(cmd *cobra.Command, args []string) {
+			// stdio mode: stdout carries the MCP protocol, so all logs to stderr.
+			utils.SetupLogrus(cc.hideLogTime, true)
+			if cc.debug {
+				logrus.SetLevel(logrus.DebugLevel)
+				logrus.Debugf("Debug output enabled")
+			}
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			srv := server.New(server.Options{})
 			return srv.StartStdio()

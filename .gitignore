@@ -33,3 +33,6 @@ bin/
 build/
 *tmp
 /workflow-*mcp
+
+# claude config
+.claude/
