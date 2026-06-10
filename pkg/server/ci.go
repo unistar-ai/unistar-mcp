@@ -39,6 +39,9 @@ func (s *Server) registerCITools() {
 
 	rerunTool := mcp.NewTool("ci_rerun_workflow",
 		mcp.WithDescription("Rerun the failed jobs of a CI workflow run. Use this for flaky failures after inspecting the logs."),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form")),
 		mcp.WithNumber("run_id", mcp.Required(), mcp.Description("The workflow run ID to rerun")),
 	)

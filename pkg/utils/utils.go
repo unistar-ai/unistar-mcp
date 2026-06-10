@@ -21,7 +21,7 @@ var (
 func SetupLogrus(hideTime bool, stdio bool) {
 	formatter := &formatter.Formatter{
 		HideKeys:        false,
-		TimestampFormat: "[15:04:05]", // hour, time, sec only
+		TimestampFormat: "15:04:05", // hour, time, sec only
 		FieldsOrder:     []string{},
 	}
 	if hideTime {

@@ -99,5 +99,6 @@ func (s *Server) StartHTTP(ctx context.Context) error {
 
 func (s *Server) registerTools() {
 	s.registerCITools()
+	s.registerPRTools()
 	s.registerBackportTools()
 }

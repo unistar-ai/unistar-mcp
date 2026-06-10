@@ -15,6 +15,9 @@ func (s *Server) registerBackportTools() {
 				"into a new branch and opening a backport PR. Requires a local clone of the repository "+
 				"(pass its path via repo_dir). If the cherry-pick conflicts, the working tree is left "+
 				"mid-cherry-pick so the conflict can be resolved manually."),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form")),
 		mcp.WithNumber("pr_number", mcp.Required(), mcp.Description("The merged pull request number to backport")),
 		mcp.WithString("target_branch", mcp.Required(), mcp.Description("The branch to backport onto, e.g. release/1.2")),
