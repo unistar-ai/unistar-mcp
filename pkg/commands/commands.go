@@ -23,6 +23,7 @@ func newBaseCmd(cmd *cobra.Command) *baseCmd {
 
 type baseOpts struct {
 	debug          bool   // Enable debug output
+	lazyLoading    bool   // Expose lazy-loading meta tools instead of full tool schemas
 	policyPath     string // Path to a signature verification policy file
 	insecurePolicy bool   // Use an "allow everything" signature verification policy
 	hideLogTime    bool   // Hide log output time (used in validation test)

@@ -8,7 +8,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
-func (s *Server) registerBackportTools() {
+func (s *Server) backportTools() []toolEntry {
 	backportTool := mcp.NewTool("pr_create_backport",
 		mcp.WithDescription(
 			"Backport a merged pull request to a target branch by cherry-picking its merge commit "+
@@ -23,7 +23,10 @@ func (s *Server) registerBackportTools() {
 		mcp.WithString("target_branch", mcp.Required(), mcp.Description("The branch to backport onto, e.g. release/1.2")),
 		mcp.WithString("repo_dir", mcp.Required(), mcp.Description("Absolute path to a local clone of the repository where git operations run")),
 	)
-	s.mcpServer.AddTool(backportTool, s.handleBackport)
+
+	return []toolEntry{
+		{tool: backportTool, handler: s.handleBackport},
+	}
 }
 
 func (s *Server) handleBackport(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -45,8 +48,8 @@ func (s *Server) handleBackport(ctx context.Context, request mcp.CallToolRequest
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	// 1. Resolve the merge commit of the PR. Empty/null means it isn't merged.
-	res := run(ctx, repoDir, "gh", "pr", "view", fmt.Sprintf("%d", prNum),
+	// Resolve the merge commit of the PR. Empty/null means it isn't merged.
+	res := runRetry(ctx, repoDir, "gh", "pr", "view", fmt.Sprintf("%d", prNum),
 		"-R", repo, "--json", "mergeCommit", "-q", ".mergeCommit.oid")
 	if res.err != nil {
 		return mcp.NewToolResultError(res.wrap("failed to resolve merge commit").Error()), nil
@@ -59,7 +62,7 @@ func (s *Server) handleBackport(ctx context.Context, request mcp.CallToolRequest
 
 	branchName := fmt.Sprintf("backport-%d-to-%s", prNum, sanitizeRef(targetBranch))
 
-	// 2. Fetch the target branch and create the backport branch from it.
+	// Fetch the target branch and create the backport branch from it.
 	if res := run(ctx, repoDir, "git", "fetch", "origin", targetBranch); res.err != nil {
 		return mcp.NewToolResultError(res.wrap("failed to fetch target branch").Error()), nil
 	}
@@ -71,9 +74,8 @@ func (s *Server) handleBackport(ctx context.Context, request mcp.CallToolRequest
 		return mcp.NewToolResultError(res.wrap("failed to create backport branch").Error()), nil
 	}
 
-	// 3. Cherry-pick the merge commit. -m 1 handles merge commits; for a normal
-	// squash/rebase commit git ignores it harmlessly? No — -m only valid on merges.
-	// Detect parent count to decide.
+	// Cherry-pick the merge commit. -m 1 is only valid on merge commits,
+	// so check the parent count before adding it.
 	cpArgs := []string{"cherry-pick", "-x"}
 	if isMergeCommit(ctx, repoDir, mergeCommit) {
 		cpArgs = append(cpArgs, "-m", "1")
@@ -95,7 +97,7 @@ func (s *Server) handleBackport(ctx context.Context, request mcp.CallToolRequest
 			branchName, repo, targetBranch, branchName, prNum, targetBranch, prNum)), nil
 	}
 
-	// 4. Push the branch and open the PR.
+	// Push the branch and open the PR.
 	if res := run(ctx, repoDir, "git", "push", "-u", "origin", branchName); res.err != nil {
 		return mcp.NewToolResultError(res.wrap("failed to push backport branch").Error()), nil
 	}

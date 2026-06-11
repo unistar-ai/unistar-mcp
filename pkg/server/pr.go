@@ -36,18 +36,16 @@ type pullRequest struct {
 	StatusCheck    []checkRollup `json:"statusCheckRollup"`
 }
 
-func (s *Server) registerPRTools() {
+func (s *Server) prTools() []toolEntry {
 	listTool := mcp.NewTool("pr_list_open",
 		mcp.WithDescription(
-			"List open pull requests for a repository with a compact CI and review summary. "+
-				"To find only your own PRs in a large repository, pass author=\"@me\"; "+
-				"pass a GitHub login to filter by a specific user."),
+			"List one author's open pull requests for a repository with a compact CI and review summary. "+
+				"By default lists your own PRs; pass author to see another user's."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form, e.g. STARRY-S/unistar-mcp")),
-		mcp.WithString("author", mcp.Description("Filter by author: \"@me\" for your own PRs, or a GitHub login. Omit for all open PRs.")),
+		mcp.WithString("author", mcp.Description("The PR author as a GitHub login. Omit for your own PRs.")),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of PRs to return (default 30)")),
 	)
-	s.mcpServer.AddTool(listTool, s.handleListPRs)
 
 	statusTool := mcp.NewTool("pr_get_status",
 		mcp.WithDescription(
@@ -57,7 +55,11 @@ func (s *Server) registerPRTools() {
 		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form")),
 		mcp.WithNumber("pr_number", mcp.Required(), mcp.Description("The pull request number")),
 	)
-	s.mcpServer.AddTool(statusTool, s.handlePRStatus)
+
+	return []toolEntry{
+		{tool: listTool, handler: s.handleListPRs},
+		{tool: statusTool, handler: s.handlePRStatus},
+	}
 }
 
 func (s *Server) handleListPRs(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -65,20 +67,20 @@ func (s *Server) handleListPRs(ctx context.Context, request mcp.CallToolRequest)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	author := request.GetString("author", "")
+	// gh resolves "@me" to the authenticated user server-side, so listing the
+	// caller's own PRs needs no explicit login lookup.
+	author := request.GetString("author", "@me")
 	limit := int(request.GetFloat("limit", 30))
 	if limit <= 0 {
 		limit = 30
 	}
 
 	args := []string{"pr", "list", "-R", repo, "--state", "open",
+		"--author", author,
 		"--limit", fmt.Sprintf("%d", limit),
 		"--json", "number,title,author,isDraft,reviewDecision,statusCheckRollup"}
-	if author != "" {
-		args = append(args, "--author", author)
-	}
 
-	res := run(ctx, "", "gh", args...)
+	res := runRetry(ctx, "", "gh", args...)
 	if res.err != nil {
 		return mcp.NewToolResultError(res.wrap("failed to list pull requests").Error()), nil
 	}
@@ -89,16 +91,15 @@ func (s *Server) handleListPRs(ctx context.Context, request mcp.CallToolRequest)
 	}
 
 	if len(prs) == 0 {
-		who := "open PRs"
-		if author != "" {
-			who = fmt.Sprintf("open PRs by %s", author)
-		}
-		return mcp.NewToolResultText(fmt.Sprintf("No %s in %s.", who, repo)), nil
+		return mcp.NewToolResultText(fmt.Sprintf("No open PRs by %s in %s.", author, repo)), nil
 	}
 
 	// One compact line per PR: "#<n> <title> @<author> CI:<state> review:<decision>".
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d open PR(s) in %s:\n", len(prs), repo)
+	if len(prs) == limit {
+		fmt.Fprintf(&b, "(list may be truncated at limit=%d; pass a larger limit to see more)\n", limit)
+	}
 	for _, pr := range prs {
 		draft := ""
 		if pr.IsDraft {
@@ -123,7 +124,7 @@ func (s *Server) handlePRStatus(ctx context.Context, request mcp.CallToolRequest
 	}
 	prNum := int(prNumFloat)
 
-	res := run(ctx, "", "gh", "pr", "view", fmt.Sprintf("%d", prNum), "-R", repo,
+	res := runRetry(ctx, "", "gh", "pr", "view", fmt.Sprintf("%d", prNum), "-R", repo,
 		"--json", "number,title,author,state,isDraft,mergeable,reviewDecision,statusCheckRollup")
 	if res.err != nil {
 		return mcp.NewToolResultError(res.wrap("failed to fetch PR status").Error()), nil

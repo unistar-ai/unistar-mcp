@@ -41,7 +41,9 @@ func newServerCmd() *serverCmd {
 			}
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			srv := server.New(server.Options{})
+			srv := server.New(server.Options{
+				LazyLoading: cc.lazyLoading,
+			})
 			return srv.StartStdio()
 		},
 	})
@@ -51,6 +53,8 @@ func newServerCmd() *serverCmd {
 
 	flags := cc.cmd.PersistentFlags()
 	flags.BoolVarP(&cc.baseCmd.debug, "debug", "", false, "enable debug output")
+	flags.BoolVarP(&cc.baseCmd.lazyLoading, "lazy", "", false,
+		"expose lazy-loading meta tools (tool_list/tool_describe/tool_call) instead of full tool schemas")
 
 	return cc
 }

@@ -27,7 +27,10 @@ func newHTTPCmd() *httpCmd {
 			}
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			srv := server.New(server.Options{Address: cc.address})
+			srv := server.New(server.Options{
+				Address:     cc.address,
+				LazyLoading: cc.lazyLoading,
+			})
 			return srv.StartHTTP(signalContext)
 		},
 	})

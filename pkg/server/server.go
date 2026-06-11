@@ -8,18 +8,24 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const shutdownTimeout = 10 * time.Second
+const shutdownTimeout = 2 * time.Second
 
 // Options contains the configuration for the MCP server.
 type Options struct {
 	// Address is the listen address for HTTP mode (e.g. ":8080").
 	// It is ignored in stdio mode.
 	Address string
+
+	// LazyLoading exposes only the tool_list/tool_describe/tool_call meta
+	// tools instead of advertising every tool schema in tools/list, keeping
+	// the schema payload constant as the tool count grows.
+	LazyLoading bool
 }
 
 type Server struct {
 	mcpServer *server.MCPServer
 	opts      Options
+	tools     []toolEntry
 }
 
 func New(opts Options) *Server {
@@ -98,7 +104,16 @@ func (s *Server) StartHTTP(ctx context.Context) error {
 }
 
 func (s *Server) registerTools() {
-	s.registerCITools()
-	s.registerPRTools()
-	s.registerBackportTools()
+	s.tools = append(s.tools, s.ciTools()...)
+	s.tools = append(s.tools, s.prTools()...)
+	s.tools = append(s.tools, s.backportTools()...)
+
+	if s.opts.LazyLoading {
+		logrus.Info("Lazy loading enabled: exposing tool_list/tool_describe/tool_call meta tools")
+		s.registerLazyTools()
+		return
+	}
+	for i := range s.tools {
+		s.mcpServer.AddTool(s.tools[i].tool, s.tools[i].handler)
+	}
 }

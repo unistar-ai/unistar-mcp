@@ -17,17 +17,15 @@ type workflowRun struct {
 	DatabaseID   int64  `json:"databaseId"`
 	WorkflowName string `json:"workflowName"`
 	Conclusion   string `json:"conclusion"`
-	HeadSHA      string `json:"headSha"`
 }
 
-func (s *Server) registerCITools() {
+func (s *Server) ciTools() []toolEntry {
 	analyzeTool := mcp.NewTool("ci_analyze_pr_failures",
 		mcp.WithDescription("List the failing CI workflow runs for a pull request, including their run IDs so they can be inspected (ci_get_failed_logs) or rerun (ci_rerun_workflow)."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form, e.g. STARRY-S/unistar-mcp")),
 		mcp.WithNumber("pr_number", mcp.Required(), mcp.Description("The pull request number")),
 	)
-	s.mcpServer.AddTool(analyzeTool, s.handleAnalyzeCI)
 
 	logsTool := mcp.NewTool("ci_get_failed_logs",
 		mcp.WithDescription("Fetch the failed-step logs of a CI workflow run so they can be analyzed to determine whether the failure is a real bug or a flaky test."),
@@ -35,7 +33,6 @@ func (s *Server) registerCITools() {
 		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form")),
 		mcp.WithNumber("run_id", mcp.Required(), mcp.Description("The workflow run ID (from ci_analyze_pr_failures)")),
 	)
-	s.mcpServer.AddTool(logsTool, s.handleGetFailedLogs)
 
 	rerunTool := mcp.NewTool("ci_rerun_workflow",
 		mcp.WithDescription("Rerun the failed jobs of a CI workflow run. Use this for flaky failures after inspecting the logs."),
@@ -45,12 +42,17 @@ func (s *Server) registerCITools() {
 		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form")),
 		mcp.WithNumber("run_id", mcp.Required(), mcp.Description("The workflow run ID to rerun")),
 	)
-	s.mcpServer.AddTool(rerunTool, s.handleRerunCI)
+
+	return []toolEntry{
+		{tool: analyzeTool, handler: s.handleAnalyzeCI},
+		{tool: logsTool, handler: s.handleGetFailedLogs},
+		{tool: rerunTool, handler: s.handleRerunCI},
+	}
 }
 
 // prHeadSHA returns the head commit SHA of the given pull request.
 func prHeadSHA(ctx context.Context, repo string, prNum int) (string, error) {
-	res := run(ctx, "", "gh", "pr", "view", fmt.Sprintf("%d", prNum),
+	res := runRetry(ctx, "", "gh", "pr", "view", fmt.Sprintf("%d", prNum),
 		"-R", repo, "--json", "headRefOid", "-q", ".headRefOid")
 	if res.err != nil {
 		return "", res.wrap("failed to resolve PR head commit")
@@ -74,10 +76,12 @@ func (s *Server) handleAnalyzeCI(ctx context.Context, request mcp.CallToolReques
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	// List recent runs for the repo and keep only the ones matching the PR head
-	// commit. This yields clean run IDs (gh pr checks does not expose them).
-	res := run(ctx, "", "gh", "run", "list", "-R", repo, "--limit", "100",
-		"--json", "databaseId,workflowName,conclusion,headSha")
+	// Filter runs by commit server-side (--commit). Listing recent runs and
+	// filtering locally misses everything in busy repositories, where other
+	// activity pushes the PR's runs out of any recent-N window.
+	res := runRetry(ctx, "", "gh", "run", "list", "-R", repo,
+		"--commit", headSHA, "--limit", fmt.Sprintf("%d", ciRunListLimit),
+		"--json", "databaseId,workflowName,conclusion")
 	if res.err != nil {
 		return mcp.NewToolResultError(res.wrap("failed to list workflow runs").Error()), nil
 	}
@@ -86,20 +90,28 @@ func (s *Server) handleAnalyzeCI(ctx context.Context, request mcp.CallToolReques
 	if err := json.Unmarshal([]byte(res.stdout), &runs); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to parse run list: %s", err)), nil
 	}
+	truncated := len(runs) == ciRunListLimit
 
+	// action_required is included because pr_get_status counts it as failing:
+	// a run held for approval blocks the PR just like a failed one, and the
+	// conclusion column tells the model it needs approval, not log analysis.
 	var failed []workflowRun
 	for _, r := range runs {
-		if r.HeadSHA != headSHA {
-			continue
-		}
 		switch strings.ToLower(r.Conclusion) {
-		case "failure", "timed_out", "startup_failure":
+		case "failure", "timed_out", "startup_failure", "action_required":
 			failed = append(failed, r)
 		}
 	}
 
 	if len(failed) == 0 {
-		return mcp.NewToolResultText(fmt.Sprintf("No failing runs for PR #%d @%s", prNum, short(headSHA))), nil
+		// pr_get_status may still report failing checks here: its rollup also
+		// covers external CI systems (commit statuses), which gh run list
+		// cannot see. Say so instead of leaving the mismatch unexplained.
+		return mcp.NewToolResultText(fmt.Sprintf(
+			"No failing GitHub Actions runs for PR #%d @%s. "+
+				"If pr_get_status reports failing checks, they come from an external CI system "+
+				"not managed by GitHub Actions; inspect those on the PR page.",
+			prNum, short(headSHA))), nil
 	}
 
 	sort.Slice(failed, func(i, j int) bool {
@@ -109,6 +121,9 @@ func (s *Server) handleAnalyzeCI(ctx context.Context, request mcp.CallToolReques
 	// Compact, one line per run: "<run_id>  <workflow>  <conclusion>".
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d failing run(s) for PR #%d @%s:\n", len(failed), prNum, short(headSHA))
+	if truncated {
+		fmt.Fprintf(&b, "(only the most recent %d runs were inspected; there may be more)\n", ciRunListLimit)
+	}
 	for _, r := range failed {
 		fmt.Fprintf(&b, "%d  %s  %s\n", r.DatabaseID, r.WorkflowName, strings.ToLower(r.Conclusion))
 	}
@@ -127,7 +142,7 @@ func (s *Server) handleGetFailedLogs(ctx context.Context, request mcp.CallToolRe
 	}
 	runID := int64(runIDFloat)
 
-	res := run(ctx, "", "gh", "run", "view", fmt.Sprintf("%d", runID),
+	res := runRetry(ctx, "", "gh", "run", "view", fmt.Sprintf("%d", runID),
 		"-R", repo, "--log-failed")
 	if res.err != nil {
 		return mcp.NewToolResultError(res.wrap("failed to fetch failed logs").Error()), nil
@@ -172,9 +187,10 @@ func (s *Server) handleRerunCI(ctx context.Context, request mcp.CallToolRequest)
 }
 
 const (
-	errBudget    = 6_000 // max bytes of extracted error lines returned
-	fallbackTail = 4_000 // max bytes returned when no error lines are recognized
-	errContext   = 2     // lines of context kept around each matched error line
+	errBudget      = 6_000 // max bytes of extracted error lines returned
+	fallbackTail   = 4_000 // max bytes returned when no error lines are recognized
+	errContext     = 2     // lines of context kept around each matched error line
+	ciRunListLimit = 100   // max workflow runs fetched per commit
 )
 
 // errLineRE matches lines that typically carry the actual failure signal.
