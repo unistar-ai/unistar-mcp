@@ -56,7 +56,7 @@ func TestToolDescribeReturnsSchema(t *testing.T) {
 	}
 	out := resultText(t, res)
 
-	for _, want := range []string{"target_branch", "repo_dir", "required"} {
+	for _, want := range []string{"target_branch", "pr_number", "required"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("describe output missing %q:\n%s", want, out)
 		}

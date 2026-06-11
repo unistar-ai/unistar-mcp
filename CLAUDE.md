@@ -18,9 +18,10 @@ GitHub pull requests by wrapping the `gh` and `git` CLIs. Its capabilities:
 - Create backport PRs: cherry-pick a merged PR onto `release/x.y`, `next/a.b.c`,
   or any custom branch, push the branch, and open the PR.
 - On cherry-pick conflicts: simple conflicts should get a suggested fix the model can
-  apply; severe conflicts are handed back to a human. Today the tool leaves the
-  cherry-pick in progress in the local clone and returns step-by-step manual
-  instructions — the auto-fix path is a planned improvement, not yet implemented.
+  apply; severe conflicts are handed back to a human. Today the tool keeps the
+  temporary workspace with the cherry-pick in progress and returns step-by-step
+  manual instructions — the auto-fix path is a planned improvement, not yet
+  implemented.
 
 ## Design principles (read before changing any tool)
 
@@ -71,7 +72,11 @@ effective context. Every design decision follows from that:
   - `pr.go` — `pr_list_open`, `pr_get_status`.
   - `ci.go` — `ci_analyze_pr_failures`, `ci_get_failed_logs`, `ci_rerun_workflow`,
     plus the log-cleaning/error-extraction helpers.
-  - `backport.go` — `pr_create_backport` (needs a local clone via `repo_dir`).
+  - `backport.go` — `pr_create_backport`. Works in a throwaway workspace: shallow
+    clone (`--depth=1 --branch <target>`) into a temp dir, fetch the merge commit at
+    depth 2, cherry-pick, push, open the PR. The workspace is always removed except
+    on a cherry-pick conflict, where it is kept (with instructions) for manual
+    resolution.
 - `pkg/utils/`, `pkg/signal/` — logging setup and signal-aware context.
 
 Runtime dependencies: `gh` (authenticated via `gh auth login` or `GH_TOKEN`) and `git`
