@@ -91,7 +91,9 @@ func (s *Server) StartHTTP(ctx context.Context) error {
 	// Ctrl-C feel slow. Injecting our own server lets us Close() it at once.
 	// When an http.Server is provided, Start does not wire its handler, so the
 	// MCP endpoint is mounted here.
-	httpServer := &http.Server{Addr: addr}
+	// ReadHeaderTimeout bounds how long a client may take to send request
+	// headers, closing the Slowloris hole gosec flags on a bare http.Server.
+	httpServer := &http.Server{Addr: addr, ReadHeaderTimeout: 10 * time.Second}
 	mcpHTTP := server.NewStreamableHTTPServer(
 		s.mcpServer,
 		server.WithStateLess(true),
