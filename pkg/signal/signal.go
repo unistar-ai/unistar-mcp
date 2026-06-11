@@ -30,7 +30,9 @@ func SetupSignalContext() context.Context {
 	go func() {
 		s := <-shutdownHandler
 		cancel()
-		fmt.Println()
+		// Newline to stderr (never stdout): in stdio mode stdout carries the
+		// MCP protocol, and this only separates ^C from the log lines below.
+		fmt.Fprintln(os.Stderr)
 		logrus.Warnf("Abort: [%s] received, cleaning up resources", s.String())
 		logrus.Warnf("Use 'Ctrl-C' again to force exit (not recommended)")
 		<-shutdownHandler

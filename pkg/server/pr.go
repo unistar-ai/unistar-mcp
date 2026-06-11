@@ -9,6 +9,10 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
+// defaultPRListLimit bounds pr_list_open output so the tool stays compact even
+// on repositories with hundreds of open PRs.
+const defaultPRListLimit = 20
+
 // prAuthor is the nested author object returned by `gh pr` JSON.
 type prAuthor struct {
 	Login string `json:"login"`
@@ -39,12 +43,14 @@ type pullRequest struct {
 func (s *Server) prTools() []toolEntry {
 	listTool := mcp.NewTool("pr_list_open",
 		mcp.WithDescription(
-			"List one author's open pull requests for a repository with a compact CI and review summary. "+
-				"By default lists your own PRs; pass author to see another user's."),
+			"List open pull requests for a repository, most recent first, with a compact CI and "+
+				"review summary per PR. Lists all authors by default; pass author=\"@me\" for your "+
+				"own PRs or a GitHub login to filter by user. Output is bounded by limit, so this is "+
+				"safe on large repositories."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form, e.g. STARRY-S/unistar-mcp")),
-		mcp.WithString("author", mcp.Description("The PR author as a GitHub login. Omit for your own PRs.")),
-		mcp.WithNumber("limit", mcp.Description("Maximum number of PRs to return (default 30)")),
+		mcp.WithString("author", mcp.Description("Filter by author: \"@me\" for your own PRs, or a GitHub login. Omit to list all authors.")),
+		mcp.WithNumber("limit", mcp.Description("Maximum number of PRs to return, newest first (default 20)")),
 	)
 
 	statusTool := mcp.NewTool("pr_get_status",
@@ -67,18 +73,21 @@ func (s *Server) handleListPRs(ctx context.Context, request mcp.CallToolRequest)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	// gh resolves "@me" to the authenticated user server-side, so listing the
-	// caller's own PRs needs no explicit login lookup.
-	author := request.GetString("author", "@me")
-	limit := int(request.GetFloat("limit", 30))
+	// Default to all authors; the limit bounds the payload regardless of repo
+	// size. author is a relevance filter, not a size control — pass "@me" or a
+	// login to narrow it (gh resolves "@me" to the caller server-side).
+	author := request.GetString("author", "")
+	limit := int(request.GetFloat("limit", defaultPRListLimit))
 	if limit <= 0 {
-		limit = 30
+		limit = defaultPRListLimit
 	}
 
 	args := []string{"pr", "list", "-R", repo, "--state", "open",
-		"--author", author,
 		"--limit", fmt.Sprintf("%d", limit),
 		"--json", "number,title,author,isDraft,reviewDecision,statusCheckRollup"}
+	if author != "" {
+		args = append(args, "--author", author)
+	}
 
 	res := runRetry(ctx, "", "gh", args...)
 	if res.err != nil {
@@ -91,7 +100,10 @@ func (s *Server) handleListPRs(ctx context.Context, request mcp.CallToolRequest)
 	}
 
 	if len(prs) == 0 {
-		return mcp.NewToolResultText(fmt.Sprintf("No open PRs by %s in %s.", author, repo)), nil
+		if author != "" {
+			return mcp.NewToolResultText(fmt.Sprintf("No open PRs by %s in %s.", author, repo)), nil
+		}
+		return mcp.NewToolResultText(fmt.Sprintf("No open PRs in %s.", repo)), nil
 	}
 
 	// One compact line per PR: "#<n> <title> @<author> CI:<state> review:<decision>".

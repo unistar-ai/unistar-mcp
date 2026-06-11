@@ -2,13 +2,17 @@ package server
 
 import (
 	"context"
+	"net/http"
 	"time"
 
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/sirupsen/logrus"
 )
 
-const shutdownTimeout = 2 * time.Second
+const (
+	mcpEndpointPath = "/mcp"
+	serverName      = "unistar-mcp"
+)
 
 // Options contains the configuration for the MCP server.
 type Options struct {
@@ -30,7 +34,7 @@ type Server struct {
 
 func New(opts Options) *Server {
 	s := server.NewMCPServer(
-		"unistar-mcp",
+		serverName,
 		"0.0.1",
 		server.WithLogging(),
 		server.WithToolCapabilities(true),
@@ -81,23 +85,35 @@ func (s *Server) StartHTTP(ctx context.Context) error {
 		addr = ":8080"
 	}
 
-	httpServer := server.NewStreamableHTTPServer(
+	// Own the underlying http.Server so shutdown can force-close connections.
+	// The MCP streamable transport keeps a long-lived streaming connection
+	// open, which a graceful Shutdown would wait on until a timeout — making
+	// Ctrl-C feel slow. Injecting our own server lets us Close() it at once.
+	// When an http.Server is provided, Start does not wire its handler, so the
+	// MCP endpoint is mounted here.
+	httpServer := &http.Server{Addr: addr}
+	mcpHTTP := server.NewStreamableHTTPServer(
 		s.mcpServer,
 		server.WithStateLess(true),
+		server.WithStreamableHTTPServer(httpServer),
 	)
+	mux := http.NewServeMux()
+	mux.Handle(mcpEndpointPath, mcpHTTP)
+	httpServer.Handler = mux
 
 	errCh := make(chan error, 1)
 	go func() {
-		logrus.Infof("Starting MCP Server over Streamable HTTP on %s (endpoint: /mcp)", addr)
-		errCh <- httpServer.Start(addr)
+		logrus.Infof("Starting MCP Server over Streamable HTTP on %s (endpoint: %s)", addr, mcpEndpointPath)
+		errCh <- mcpHTTP.Start(addr)
 	}()
 
 	select {
 	case <-ctx.Done():
+		// The signal context has already cancelled any in-flight tool calls,
+		// so there is nothing to drain. Force-close immediately, including the
+		// idle streaming connection a graceful Shutdown would block on.
 		logrus.Info("Shutting down MCP HTTP server")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		return httpServer.Shutdown(shutdownCtx)
+		return httpServer.Close()
 	case err := <-errCh:
 		return err
 	}

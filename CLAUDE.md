@@ -7,9 +7,9 @@ This file provides guidance to Claude Code when working with code in this reposi
 unistar-mcp is an MCP (Model Context Protocol) server, written in Go, that helps manage
 GitHub pull requests by wrapping the `gh` and `git` CLIs. Its capabilities:
 
-- List one author's open PRs (defaults to my own via gh's `@me`; pass `author` for a
-  specific user — always filtered by author because large repositories have far too
-  many open PRs to list them all) and show a compact per-PR status: CI state, review
+- List open PRs (all authors by default, most recent first; pass `author="@me"` for
+  mine or a login to filter — the `limit`, default 20, bounds the payload so large
+  repositories stay compact) and show a compact per-PR status: CI state, review
   decision, mergeability.
 - Analyze CI failures for a PR: find the failing workflow runs, fetch only the
   failed-step logs, and extract the error lines so the model can judge whether a
@@ -22,6 +22,19 @@ GitHub pull requests by wrapping the `gh` and `git` CLIs. Its capabilities:
   temporary workspace with the cherry-pick in progress and returns step-by-step
   manual instructions — the auto-fix path is a planned improvement, not yet
   implemented.
+
+## Using the MCP (vs developing it)
+
+When the task is to **inspect or act on a PR or its CI** (check status, find why CI
+is failing, decide flaky vs real, rerun jobs, backport) — as opposed to changing this
+server's own code — use the unistar-mcp tools, not raw `gh`/`git`. The
+`pr-ci-triage` skill (`.claude/skills/pr-ci-triage/SKILL.md`) documents the intended
+tool-chaining workflow. `gh pr`/`gh run` are denied in `.claude/settings.json` so the
+MCP path is the one taken; for a stricter demo, also deny `Bash(gh:*)` and `Bash(git:*)`.
+
+The server is registered for Claude Code in `.mcp.json` at the repo root (project
+scope). `mcpServers` does **not** belong in `.claude/settings.json` — Claude Code
+ignores it there.
 
 ## Design principles (read before changing any tool)
 

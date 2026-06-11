@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -44,17 +45,31 @@ func (s *Server) handleBackport(ctx context.Context, request mcp.CallToolRequest
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	// Resolve the merge commit of the PR. Empty/null means it isn't merged.
+	// Fetch the merge commit plus the title/body used to compose the backport
+	// PR. An empty merge commit means the PR isn't merged.
 	res := runRetry(ctx, "", "gh", "pr", "view", fmt.Sprintf("%d", prNum),
-		"-R", repo, "--json", "mergeCommit", "-q", ".mergeCommit.oid")
+		"-R", repo, "--json", "mergeCommit,title,body")
 	if res.err != nil {
-		return mcp.NewToolResultError(res.wrap("failed to resolve merge commit").Error()), nil
+		return mcp.NewToolResultError(res.wrap("failed to fetch PR details").Error()), nil
 	}
-	mergeCommit := strings.TrimSpace(res.stdout)
-	if mergeCommit == "" || mergeCommit == "null" {
+	var info struct {
+		MergeCommit struct {
+			OID string `json:"oid"`
+		} `json:"mergeCommit"`
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(res.stdout), &info); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to parse PR details: %s", err)), nil
+	}
+	mergeCommit := info.MergeCommit.OID
+	if mergeCommit == "" {
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"PR #%d does not have a merge commit (is it merged?).", prNum)), nil
 	}
+
+	// Who triggered the backport, recorded in the PR body.
+	who := ghCurrentUser(ctx)
 
 	branchName := fmt.Sprintf("backport-%d-to-%s", prNum, sanitizeRef(targetBranch))
 
@@ -109,11 +124,11 @@ func (s *Server) handleBackport(ctx context.Context, request mcp.CallToolRequest
 				"  1. cd %s\n"+
 				"  2. resolve conflicts, then: git add -A && git cherry-pick --continue\n"+
 				"  3. git push -u origin %s\n"+
-				"  4. gh pr create -R %s --base %s --head %s --title \"Backport #%d to %s\" --body \"Backport of #%d\"\n"+
+				"  4. gh pr create -R %s --base %s --head %s --title \"[Hackathon][backport -> %s] %s\" --body \"Automated backport of #%d\"\n"+
 				"  5. remove the workspace: rm -rf %s\n\n"+
 				"To give up instead: rm -rf %s",
 			short(mergeCommit), targetBranch, branchName, workDir, res.combined(),
-			workDir, branchName, repo, targetBranch, branchName, prNum, targetBranch, prNum,
+			workDir, branchName, repo, targetBranch, branchName, targetBranch, info.Title, prNum,
 			workDir, workDir)), nil
 	}
 
@@ -122,8 +137,8 @@ func (s *Server) handleBackport(ctx context.Context, request mcp.CallToolRequest
 		return mcp.NewToolResultError(res.wrap("failed to push backport branch").Error()), nil
 	}
 
-	title := fmt.Sprintf("Backport #%d to %s", prNum, targetBranch)
-	body := fmt.Sprintf("Backport of #%d to `%s`.", prNum, targetBranch)
+	title := fmt.Sprintf("[Hackathon][backport -> %s] %s", targetBranch, info.Title)
+	body := backportBody(targetBranch, who, info.Body)
 	res = run(ctx, workDir, "gh", "pr", "create", "-R", repo,
 		"--base", targetBranch, "--head", branchName,
 		"--title", title, "--body", body)
@@ -135,6 +150,29 @@ func (s *Server) handleBackport(ctx context.Context, request mcp.CallToolRequest
 	// gh pr create prints the new PR URL.
 	return mcp.NewToolResultText(fmt.Sprintf(
 		"Backport PR opened: %s", strings.TrimSpace(res.stdout))), nil
+}
+
+// ghCurrentUser returns the login of the authenticated GitHub user, or
+// "unknown" if it cannot be resolved — the backport should not fail just
+// because the username lookup did.
+func ghCurrentUser(ctx context.Context) string {
+	res := runRetry(ctx, "", "gh", "api", "user", "-q", ".login")
+	login := strings.TrimSpace(res.stdout)
+	if res.err != nil || login == "" {
+		return "unknown"
+	}
+	return login
+}
+
+// backportBody composes the backport PR description: a provenance line
+// recording the target, who triggered it, and this server, followed by the
+// original PR's description.
+func backportBody(targetBranch, who, originalBody string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Automated backport to `%s`, triggered by @%s, using MCP `%s`\n\n", targetBranch, who, serverName)
+	b.WriteString("## Original Description\n")
+	b.WriteString(originalBody)
+	return b.String()
 }
 
 // isMergeCommit reports whether the commit has more than one parent.
