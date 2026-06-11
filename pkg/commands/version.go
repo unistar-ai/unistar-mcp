@@ -20,7 +20,7 @@ func newVersionCmd() *versionCmd {
 		Short:   "Show version",
 		Example: "  unistar-mcp version",
 		PreRun: func(cmd *cobra.Command, args []string) {
-			utils.SetupLogrus(cc.hideLogTime, false)
+			utils.SetupLogrus(cc.hideLogTime, false, cc.logFile)
 			if cc.debug {
 				logrus.SetLevel(logrus.DebugLevel)
 				logrus.Debugf("Debug output enabled")

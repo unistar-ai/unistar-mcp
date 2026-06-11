@@ -3,7 +3,7 @@
     "unistar-mcp": {
       "type": "stdio",
       "command": "go",
-      "args": ["run", "./cmd"]
+      "args": ["run", "./cmd", "--log-file=unistar-mcp.log", "--lazy", "--debug"]
     }
   }
 }

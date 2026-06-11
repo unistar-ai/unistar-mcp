@@ -34,7 +34,7 @@ func newServerCmd() *serverCmd {
 		Short: "Start the unistar-mcp CI workflow helper server (stdio mode).",
 		PreRun: func(cmd *cobra.Command, args []string) {
 			// stdio mode: stdout carries the MCP protocol, so all logs to stderr.
-			utils.SetupLogrus(cc.hideLogTime, true)
+			utils.SetupLogrus(cc.hideLogTime, true, cc.logFile)
 			if cc.debug {
 				logrus.SetLevel(logrus.DebugLevel)
 				logrus.Debugf("Debug output enabled")
@@ -55,6 +55,8 @@ func newServerCmd() *serverCmd {
 	flags.BoolVarP(&cc.baseCmd.debug, "debug", "", false, "enable debug output")
 	flags.BoolVarP(&cc.baseCmd.lazyLoading, "lazy", "", false,
 		"expose lazy-loading meta tools (tool_list/tool_describe/tool_call) instead of full tool schemas")
+	flags.StringVarP(&cc.baseCmd.logFile, "log-file", "", "",
+		"append logs to this file in addition to stderr (useful in stdio mode, where the MCP host hides stderr)")
 
 	return cc
 }

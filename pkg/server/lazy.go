@@ -21,14 +21,14 @@ func (s *Server) registerLazyTools() {
 				"Use tool_describe to see a tool's parameters, and tool_call to execute it."),
 		mcp.WithReadOnlyHintAnnotation(true),
 	)
-	s.mcpServer.AddTool(listTool, s.handleToolList)
+	s.addTool(listTool, s.handleToolList)
 
 	describeTool := mcp.NewTool("tool_describe",
 		mcp.WithDescription("Show the full description and parameter schema of a tool from tool_list."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("name", mcp.Required(), mcp.Description("The tool name, e.g. pr_list_open")),
 	)
-	s.mcpServer.AddTool(describeTool, s.handleToolDescribe)
+	s.addTool(describeTool, s.handleToolDescribe)
 
 	callTool := mcp.NewTool("tool_call",
 		mcp.WithDescription(
@@ -38,7 +38,7 @@ func (s *Server) registerLazyTools() {
 		mcp.WithString("name", mcp.Required(), mcp.Description("The tool name to execute, from tool_list")),
 		mcp.WithObject("args", mcp.Description("The tool parameters as a JSON object (not a string)")),
 	)
-	s.mcpServer.AddTool(callTool, s.handleToolCall)
+	s.addTool(callTool, s.handleToolCall)
 }
 
 func (s *Server) handleToolList(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {

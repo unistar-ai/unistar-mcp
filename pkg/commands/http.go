@@ -20,7 +20,7 @@ func newHTTPCmd() *httpCmd {
 		Short: "Run the unistar-mcp server in Streamable HTTP mode",
 		Long:  "Run the unistar-mcp server over Streamable HTTP, exposing the MCP endpoint at /mcp.",
 		PreRun: func(cmd *cobra.Command, args []string) {
-			utils.SetupLogrus(cc.hideLogTime, false)
+			utils.SetupLogrus(cc.hideLogTime, false, cc.logFile)
 			if cc.debug {
 				logrus.SetLevel(logrus.DebugLevel)
 				logrus.Debugf("Debug output enabled")

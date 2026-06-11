@@ -17,8 +17,10 @@ var (
 
 // SetupLogrus configures logrus output. When stdio is true the process speaks
 // the MCP protocol over stdout, so ALL log levels must be routed to stderr to
-// avoid corrupting the JSON-RPC stream.
-func SetupLogrus(hideTime bool, stdio bool) {
+// avoid corrupting the JSON-RPC stream. When logFile is non-empty, logs are
+// also appended to that file — useful in stdio mode, where the MCP host
+// captures stderr and the operator otherwise cannot see the logs.
+func SetupLogrus(hideTime bool, stdio bool, logFile string) {
 	formatter := &formatter.Formatter{
 		HideKeys:        false,
 		TimestampFormat: "15:04:05", // hour, time, sec only
@@ -58,4 +60,18 @@ func SetupLogrus(hideTime bool, stdio bool) {
 			logrus.DebugLevel,
 		},
 	})
+
+	// An explicit log file gets every level appended to it, so the operator
+	// has a durable, tail-able copy even when the MCP host swallows stderr.
+	if logFile != "" {
+		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			logrus.Warnf("failed to open log file %q (logging to stderr only): %s", logFile, err)
+		} else {
+			logrus.AddHook(&writer.Hook{
+				Writer:    f,
+				LogLevels: logrus.AllLevels,
+			})
+		}
+	}
 }

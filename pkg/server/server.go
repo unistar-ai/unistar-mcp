@@ -132,6 +132,6 @@ func (s *Server) registerTools() {
 		return
 	}
 	for i := range s.tools {
-		s.mcpServer.AddTool(s.tools[i].tool, s.tools[i].handler)
+		s.addTool(s.tools[i].tool, s.tools[i].handler)
 	}
 }

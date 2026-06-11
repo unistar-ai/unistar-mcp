@@ -119,19 +119,21 @@ func runEnv(ctx context.Context, dir string, extraEnv []string, name string, arg
 	// so the (capped) output strings are only built when debug is enabled.
 	if logrus.IsLevelEnabled(logrus.DebugLevel) {
 		logrus.Debugf("exec result: %s exit=%d stdout=%q stderr=%q",
-			name, res.exitCode, clipForLog(res.stdout), clipForLog(res.stderr))
+			name, res.exitCode, clipForLog(res.stdout, execLogCap), clipForLog(res.stderr, execLogCap))
 	}
 	return res
 }
 
-// clipForLog bounds command output included in debug logs so a large payload
-// (e.g. a multi-MB log download) does not flood the log.
-func clipForLog(s string) string {
-	const logOutputCap = 2_000
-	if len(s) <= logOutputCap {
+// execLogCap bounds each command output stream included in debug logs so a
+// large payload (e.g. a multi-MB log download) does not flood the log.
+const execLogCap = 2_000
+
+// clipForLog bounds a string included in a debug log line to limit bytes.
+func clipForLog(s string, limit int) string {
+	if len(s) <= limit {
 		return s
 	}
-	return s[:logOutputCap] + "…[truncated]"
+	return s[:limit] + "…[truncated]"
 }
 
 // wrap turns a failed command into an error whose message is tailored to the
