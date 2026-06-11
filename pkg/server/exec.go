@@ -114,7 +114,24 @@ func runEnv(ctx context.Context, dir string, extraEnv []string, name string, arg
 	if errors.As(err, &exitErr) {
 		res.exitCode = exitErr.ExitCode()
 	}
+
+	// In debug mode also log the command's result. Guarded by the level check
+	// so the (capped) output strings are only built when debug is enabled.
+	if logrus.IsLevelEnabled(logrus.DebugLevel) {
+		logrus.Debugf("exec result: %s exit=%d stdout=%q stderr=%q",
+			name, res.exitCode, clipForLog(res.stdout), clipForLog(res.stderr))
+	}
 	return res
+}
+
+// clipForLog bounds command output included in debug logs so a large payload
+// (e.g. a multi-MB log download) does not flood the log.
+func clipForLog(s string) string {
+	const logOutputCap = 2_000
+	if len(s) <= logOutputCap {
+		return s
+	}
+	return s[:logOutputCap] + "…[truncated]"
 }
 
 // wrap turns a failed command into an error whose message is tailored to the
