@@ -28,10 +28,12 @@ func (s *Server) ciTools() []toolEntry {
 	)
 
 	logsTool := mcp.NewTool("ci_get_failed_logs",
-		mcp.WithDescription("Fetch the failed-step logs of a CI workflow run so they can be analyzed to determine whether the failure is a real bug or a flaky test."),
+		mcp.WithDescription("Fetch the failed-step logs of a CI workflow run so they can be analyzed to determine whether the failure is a real bug or a flaky test. Pass max_lines > 0 to page through long logs (use next_offset_lines from the response header)."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form")),
 		mcp.WithNumber("run_id", mcp.Required(), mcp.Description("The workflow run ID (from ci_analyze_pr_failures)")),
+		mcp.WithNumber("offset_lines", mcp.Description("Line offset for pagination (default 0). Use next_offset_lines from a previous page.")),
+		mcp.WithNumber("max_lines", mcp.Description("Lines per page (default 0 = single chunk capped at ~6KB). Set e.g. 80 to enable paging.")),
 	)
 
 	rerunTool := mcp.NewTool("ci_rerun_workflow",
@@ -141,6 +143,14 @@ func (s *Server) handleGetFailedLogs(ctx context.Context, request mcp.CallToolRe
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	runID := int64(runIDFloat)
+	offsetLines := int(request.GetFloat("offset_lines", 0))
+	maxLines := int(request.GetFloat("max_lines", 0))
+	if offsetLines < 0 {
+		offsetLines = 0
+	}
+	if maxLines < 0 {
+		maxLines = 0
+	}
 
 	res := runRetry(ctx, "", "gh", "run", "view", fmt.Sprintf("%d", runID),
 		"-R", repo, "--log-failed")
@@ -155,16 +165,41 @@ func (s *Server) handleGetFailedLogs(ctx context.Context, request mcp.CallToolRe
 
 	clean := cleanGHLog(res.stdout)
 
-	// Smart extraction: pull only the error lines (+ a little context) instead of
-	// dumping the whole log, so a small model gets the signal, not the noise.
+	var body string
+	var mode string
 	if extracted, n := extractErrors(clean); n > 0 {
-		return mcp.NewToolResultText(fmt.Sprintf(
-			"Run %d — %d error line(s):\n\n%s", runID, n, tail(extracted, errBudget))), nil
+		body = extracted
+		mode = "error lines"
+	} else {
+		body = clean
+		mode = "log tail"
 	}
 
-	// No recognizable error markers: fall back to a small tail.
+	if maxLines > 0 {
+		page, total, next, hasMore := paginateLines(body, offsetLines, maxLines)
+		if total == 0 {
+			return mcp.NewToolResultText(fmt.Sprintf(
+				"Run %d — empty %s (offset %d).", runID, mode, offsetLines)), nil
+		}
+		start := offsetLines + 1
+		end := next
+		if end > total {
+			end = total
+		}
+		pageNum := offsetLines/maxLines + 1
+		totalPages := (total + maxLines - 1) / maxLines
+		return mcp.NewToolResultText(fmt.Sprintf(
+			"Run %d — %s lines %d-%d of %d (page %d/%d, has_more: %t, next_offset_lines: %d)\n\n%s",
+			runID, mode, start, end, total, pageNum, totalPages, hasMore, next, page)), nil
+	}
+
+	// Legacy single-chunk mode (~6KB cap).
+	if mode == "error lines" {
+		return mcp.NewToolResultText(fmt.Sprintf(
+			"Run %d — %d error line(s):\n\n%s", runID, strings.Count(body, "\n")+1, tail(body, errBudget))), nil
+	}
 	return mcp.NewToolResultText(fmt.Sprintf(
-		"Run %d — no recognizable error lines, showing tail:\n\n%s", runID, tail(clean, fallbackTail))), nil
+		"Run %d — no recognizable error lines, showing tail:\n\n%s", runID, tail(body, fallbackTail))), nil
 }
 
 func (s *Server) handleRerunCI(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -284,6 +319,26 @@ func short(sha string) string {
 }
 
 // tail returns at most n trailing bytes of s, prefixed with a notice when truncated.
+// paginateLines returns a slice of lines [offset, offset+maxLines) from text.
+func paginateLines(text string, offsetLines, maxLines int) (page string, totalLines, nextOffset int, hasMore bool) {
+	if maxLines <= 0 {
+		return text, 0, 0, false
+	}
+	lines := strings.Split(text, "\n")
+	totalLines = len(lines)
+	if offsetLines >= totalLines {
+		return "", totalLines, totalLines, false
+	}
+	end := offsetLines + maxLines
+	if end > totalLines {
+		end = totalLines
+	}
+	page = strings.Join(lines[offsetLines:end], "\n")
+	nextOffset = end
+	hasMore = end < totalLines
+	return page, totalLines, nextOffset, hasMore
+}
+
 func tail(s string, n int) string {
 	if len(s) <= n {
 		return s
