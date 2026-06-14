@@ -1,0 +1,29 @@
+---
+description: Design principles and conventions when adding or changing MCP tools
+globs: pkg/server/**/*.go
+alwaysApply: false
+---
+
+# MCP tool development
+
+Target audience: small local LLMs with short context. Every tool change should follow these constraints.
+
+## Design principles
+
+- **Save context.** Request only needed JSON fields (`--json a,b,c`), return short plain-text summaries (one line per item). Reuse patterns in `pr.go` (`ciState`, `tallyChecks`) and `ci.go` (`extractErrors`, `cleanGHLog`, `tail`).
+- **Keep tools simple.** Few required params, flat inputs, one job per tool. Descriptions must name the next tool to call (e.g. `ci_analyze_pr_failures` → `ci_get_failed_logs` → `ci_rerun_workflow`).
+- **Actionable errors.** Route failures through `runResult.wrap()` in `exec.go`; never return raw stderr.
+- **Hard output caps.** Log tools use `errBudget`/`fallbackTail` in `ci.go`; any new high-volume tool needs a similar cap.
+
+## Conventions
+
+- Tool results: human-readable plain text via `strings.Builder`, not JSON.
+- Read-only tools: `mcp.WithReadOnlyHintAnnotation(true)`.
+- Mutating tools: set destructive/idempotent/open-world hints (see `ci_rerun_workflow`, `pr_create_backport`).
+- Param validation: `request.RequireString` / `RequireFloat`; return `mcp.NewToolResultError(err.Error()), nil` on failure.
+- Read-only external commands: `runRetry()`. Mutating commands: `run()` only (no retry).
+- Comments: plain English prose; no numbered lists in comments.
+
+## Registry
+
+All tool groups return `[]toolEntry` into `registry.go`. Full mode registers directly; `--lazy` mode dispatches via `tool_list` / `tool_describe` / `tool_call`.

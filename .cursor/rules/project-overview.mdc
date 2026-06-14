@@ -1,0 +1,34 @@
+---
+description: unistar-mcp project overview, MCP usage vs development, common commands
+alwaysApply: true
+---
+
+# unistar-mcp
+
+Go MCP server wrapping `gh` and `git` for PR/CI workflows. Built for small local models: compact tool output, actionable errors, byte caps on logs.
+
+## MCP tools (use these, not raw gh/git)
+
+When inspecting or acting on a PR or its CI — not when changing this server's code — use the **unistar-mcp** MCP tools. Follow the `pr-ci-triage` skill (`.cursor/skills/pr-ci-triage/SKILL.md`). Do not shell out to `gh pr`, `gh run`, or `git` for triage/backport tasks that the MCP tools cover.
+
+Server is registered in `.cursor/mcp.json`. Enable it in **Cursor Settings → Tools & MCP** on first open.
+
+## Common commands
+
+```sh
+go build ./...        # compile check
+make test             # unit tests
+make verify           # module verification
+go run ./cmd          # stdio MCP server
+go run ./cmd http     # Streamable HTTP on :8080
+go run ./cmd --lazy   # lazy meta-tool mode
+```
+
+## Architecture (short)
+
+- `cmd/main.go` → `pkg/commands/` (cobra CLI)
+- `pkg/server/` — MCP tools: `server.go`, `registry.go`, `lazy.go`, `exec.go`, `pr.go`, `ci.go`, `backport.go`
+- New tools go through `registry.go` (`[]toolEntry`), never `AddTool` directly
+- External commands only via `exec.go` (`run`/`runRetry`/`runEnv`)
+
+Full development guidance: `AGENTS.md` and `CLAUDE.md`.

@@ -161,6 +161,25 @@ then `go build -o unistar-mcp ./cmd`.
 
 Personal config (`.claude/settings.local.json`) is gitignored and never shared.
 
+## Use with Cursor
+
+This repo ships a ready-to-use Cursor setup alongside the Claude Code config:
+
+- **`.cursor/mcp.json`** registers the server with `go run ./cmd` — same zero-build
+  workflow as `.mcp.json`. Enable it under **Settings → Tools & MCP** the first time
+  you open the project.
+- **`.cursor/skills/pr-ci-triage`** documents the intended tool-chaining workflow.
+- **`.cursor/rules/`** provides always-on project context and file-scoped conventions
+  for MCP tool development.
+- **`AGENTS.md`** is the agent-facing development guide (Cursor and other clients);
+  `CLAUDE.md` remains the Claude Code–specific equivalent.
+
+For faster startup, build once and point the command at the binary (use
+`${workspaceFolder}/unistar-mcp` in `.cursor/mcp.json`).
+
+Unlike Claude Code, Cursor has no built-in Bash deny list — the rules and skill steer
+the agent toward MCP tools instead of raw `gh`/`git` for PR/CI tasks.
+
 ## Notes
 
 - **Backport** requires a *merged* PR and runs in a throwaway shallow clone, so your own

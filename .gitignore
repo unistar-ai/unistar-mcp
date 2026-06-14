@@ -39,3 +39,7 @@ build/
 # claude config: share project settings/skills and the MCP registration,
 # but keep personal/local config (per-user allow lists, MCP approvals) out.
 .claude/settings.local.json
+
+# cursor config: share project rules/skills/MCP registration;
+# ignore editor-local state if present.
+.cursor/settings.json
