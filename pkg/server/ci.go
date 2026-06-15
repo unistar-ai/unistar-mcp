@@ -17,6 +17,15 @@ type workflowRun struct {
 	DatabaseID   int64  `json:"databaseId"`
 	WorkflowName string `json:"workflowName"`
 	Conclusion   string `json:"conclusion"`
+	Status       string `json:"status"`
+}
+
+type branchRun struct {
+	DatabaseID   int64  `json:"databaseId"`
+	WorkflowName string `json:"workflowName"`
+	Conclusion   string `json:"conclusion"`
+	Status       string `json:"status"`
+	HeadBranch   string `json:"headBranch"`
 }
 
 func (s *Server) ciTools() []toolEntry {
@@ -45,10 +54,19 @@ func (s *Server) ciTools() []toolEntry {
 		mcp.WithNumber("run_id", mcp.Required(), mcp.Description("The workflow run ID to rerun")),
 	)
 
+	listRunsTool := mcp.NewTool("ci_list_runs",
+		mcp.WithDescription("List recent GitHub Actions workflow runs on a branch (default branch when branch is omitted). Used by main-guard and CI efficiency reports."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form")),
+		mcp.WithString("branch", mcp.Description("Branch name (default: repository default branch)")),
+		mcp.WithNumber("limit", mcp.Description("Max runs to return (default 15, max 50)")),
+	)
+
 	return []toolEntry{
 		{tool: analyzeTool, handler: s.handleAnalyzeCI},
 		{tool: logsTool, handler: s.handleGetFailedLogs},
 		{tool: rerunTool, handler: s.handleRerunCI},
+		{tool: listRunsTool, handler: s.handleListRuns},
 	}
 }
 
@@ -60,6 +78,19 @@ func prHeadSHA(ctx context.Context, repo string, prNum int) (string, error) {
 		return "", res.wrap("failed to resolve PR head commit")
 	}
 	return strings.TrimSpace(res.stdout), nil
+}
+
+func defaultBranch(ctx context.Context, repo string) (string, error) {
+	res := runRetry(ctx, "", "gh", "repo", "view", "-R", repo,
+		"--json", "defaultBranchRef", "-q", ".defaultBranchRef.name")
+	if res.err != nil {
+		return "", res.wrap("failed to resolve default branch")
+	}
+	branch := strings.TrimSpace(res.stdout)
+	if branch == "" {
+		return "", fmt.Errorf("empty default branch for %s", repo)
+	}
+	return branch, nil
 }
 
 func (s *Server) handleAnalyzeCI(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -200,6 +231,51 @@ func (s *Server) handleGetFailedLogs(ctx context.Context, request mcp.CallToolRe
 	}
 	return mcp.NewToolResultText(fmt.Sprintf(
 		"Run %d — no recognizable error lines, showing tail:\n\n%s", runID, tail(body, fallbackTail))), nil
+}
+
+func (s *Server) handleListRuns(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	repo, err := request.RequireString("repo")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	branch := strings.TrimSpace(request.GetString("branch", ""))
+	if branch == "" {
+		branch, err = defaultBranch(ctx, repo)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+	}
+	limit := int(request.GetFloat("limit", 15))
+	if limit <= 0 {
+		limit = 15
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	res := runRetry(ctx, "", "gh", "run", "list", "-R", repo,
+		"--branch", branch, "--limit", fmt.Sprintf("%d", limit),
+		"--json", "databaseId,workflowName,conclusion,status,headBranch")
+	if res.err != nil {
+		return mcp.NewToolResultError(res.wrap("failed to list workflow runs").Error()), nil
+	}
+
+	var runs []branchRun
+	if err := json.Unmarshal([]byte(res.stdout), &runs); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to parse run list: %s", err)), nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "branch: %s\n%d run(s) for %s:\n", branch, len(runs), repo)
+	for _, r := range runs {
+		conclusion := strings.ToLower(strings.TrimSpace(r.Conclusion))
+		if conclusion == "" {
+			conclusion = strings.ToLower(strings.TrimSpace(r.Status))
+		}
+		fmt.Fprintf(&b, "%d  %s  %s\n", r.DatabaseID, r.WorkflowName, conclusion)
+	}
+
+	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
 }
 
 func (s *Server) handleRerunCI(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {

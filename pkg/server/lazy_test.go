@@ -37,7 +37,7 @@ func TestToolListContainsAllTools(t *testing.T) {
 
 	for _, name := range []string{
 		"pr_list_open", "pr_get_status",
-		"ci_analyze_pr_failures", "ci_get_failed_logs", "ci_rerun_workflow",
+		"ci_analyze_pr_failures", "ci_get_failed_logs", "ci_rerun_workflow", "ci_list_runs",
 		"pr_create_backport",
 	} {
 		if !strings.Contains(out, name) {
