@@ -123,7 +123,7 @@ func (s *Server) StartHTTP(ctx context.Context) error {
 
 func (s *Server) registerTools() {
 	s.tools = append(s.tools, s.ciTools()...)
-	s.tools = append(s.tools, s.prTools()...)
+	s.tools = append(s.tools, s.allPRTools()...)
 	s.tools = append(s.tools, s.backportTools()...)
 	s.tools = append(s.tools, s.issueTools()...)
 	s.tools = append(s.tools, s.securityTools()...)

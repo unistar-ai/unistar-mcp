@@ -62,11 +62,21 @@ func (s *Server) ciTools() []toolEntry {
 		mcp.WithNumber("limit", mcp.Description("Max runs to return (default 15, max 50)")),
 	)
 
+	runSummaryTool := mcp.NewTool("ci_get_run_summary",
+		mcp.WithDescription(
+			"Compact workflow run summary: status, conclusion, duration, and failed job names. "+
+				"Use before ci_get_failed_logs to decide whether full logs are needed."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form")),
+		mcp.WithNumber("run_id", mcp.Required(), mcp.Description("Workflow run ID")),
+	)
+
 	return []toolEntry{
 		{tool: analyzeTool, handler: s.handleAnalyzeCI},
 		{tool: logsTool, handler: s.handleGetFailedLogs},
 		{tool: rerunTool, handler: s.handleRerunCI},
 		{tool: listRunsTool, handler: s.handleListRuns},
+		{tool: runSummaryTool, handler: s.handleGetRunSummary},
 	}
 }
 
@@ -104,42 +114,12 @@ func (s *Server) handleAnalyzeCI(ctx context.Context, request mcp.CallToolReques
 	}
 	prNum := int(prNumFloat)
 
-	headSHA, err := prHeadSHA(ctx, repo, prNum)
+	headSHA, failed, truncated, err := failingRunsForPR(ctx, repo, prNum)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	// Filter runs by commit server-side (--commit). Listing recent runs and
-	// filtering locally misses everything in busy repositories, where other
-	// activity pushes the PR's runs out of any recent-N window.
-	res := runRetry(ctx, "", "gh", "run", "list", "-R", repo,
-		"--commit", headSHA, "--limit", fmt.Sprintf("%d", ciRunListLimit),
-		"--json", "databaseId,workflowName,conclusion")
-	if res.err != nil {
-		return mcp.NewToolResultError(res.wrap("failed to list workflow runs").Error()), nil
-	}
-
-	var runs []workflowRun
-	if err := json.Unmarshal([]byte(res.stdout), &runs); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to parse run list: %s", err)), nil
-	}
-	truncated := len(runs) == ciRunListLimit
-
-	// action_required is included because pr_get_status counts it as failing:
-	// a run held for approval blocks the PR just like a failed one, and the
-	// conclusion column tells the model it needs approval, not log analysis.
-	var failed []workflowRun
-	for _, r := range runs {
-		switch strings.ToLower(r.Conclusion) {
-		case "failure", "timed_out", "startup_failure", "action_required":
-			failed = append(failed, r)
-		}
-	}
-
 	if len(failed) == 0 {
-		// pr_get_status may still report failing checks here: its rollup also
-		// covers external CI systems (commit statuses), which gh run list
-		// cannot see. Say so instead of leaving the mismatch unexplained.
 		return mcp.NewToolResultText(fmt.Sprintf(
 			"No failing GitHub Actions runs for PR #%d @%s. "+
 				"If pr_get_status reports failing checks, they come from an external CI system "+
@@ -151,7 +131,6 @@ func (s *Server) handleAnalyzeCI(ctx context.Context, request mcp.CallToolReques
 		return failed[i].WorkflowName < failed[j].WorkflowName
 	})
 
-	// Compact, one line per run: "<run_id>  <workflow>  <conclusion>".
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d failing run(s) for PR #%d @%s:\n", len(failed), prNum, short(headSHA))
 	if truncated {
@@ -162,6 +141,114 @@ func (s *Server) handleAnalyzeCI(ctx context.Context, request mcp.CallToolReques
 	}
 
 	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
+}
+
+type runJob struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+}
+
+type runSummary struct {
+	DatabaseID   int64    `json:"databaseId"`
+	WorkflowName string   `json:"workflowName"`
+	Status       string   `json:"status"`
+	Conclusion   string   `json:"conclusion"`
+	CreatedAt    string   `json:"createdAt"`
+	UpdatedAt    string   `json:"updatedAt"`
+	HeadBranch   string   `json:"headBranch"`
+	Jobs         []runJob `json:"jobs"`
+}
+
+func (s *Server) handleGetRunSummary(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	repo, err := request.RequireString("repo")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	runIDFloat, err := request.RequireFloat("run_id")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	runID := int64(runIDFloat)
+
+	res := runRetry(ctx, "", "gh", "run", "view", fmt.Sprintf("%d", runID), "-R", repo,
+		"--json", "databaseId,workflowName,status,conclusion,createdAt,updatedAt,headBranch,jobs")
+	if res.err != nil {
+		return mcp.NewToolResultError(res.wrap("failed to fetch run summary").Error()), nil
+	}
+
+	var run runSummary
+	if err := json.Unmarshal([]byte(res.stdout), &run); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to parse run summary: %s", err)), nil
+	}
+
+	conclusion := strings.ToLower(strings.TrimSpace(run.Conclusion))
+	if conclusion == "" {
+		conclusion = strings.ToLower(strings.TrimSpace(run.Status))
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Run %d  %s\n", run.DatabaseID, run.WorkflowName)
+	fmt.Fprintf(&b, "Branch: %s\n", run.HeadBranch)
+	fmt.Fprintf(&b, "Status: %s  Conclusion: %s\n", strings.ToLower(run.Status), conclusion)
+	if run.CreatedAt != "" && run.UpdatedAt != "" {
+		fmt.Fprintf(&b, "Started: %s  Updated: %s\n", run.CreatedAt, run.UpdatedAt)
+	}
+
+	var failed, pending, success int
+	var failedNames []string
+	for _, j := range run.Jobs {
+		jc := strings.ToLower(strings.TrimSpace(j.Conclusion))
+		if jc == "" {
+			jc = strings.ToLower(strings.TrimSpace(j.Status))
+		}
+		switch jc {
+		case "success", "skipped", "neutral":
+			success++
+		case "failure", "timed_out", "cancelled", "startup_failure", "action_required":
+			failed++
+			failedNames = append(failedNames, j.Name)
+		default:
+			pending++
+		}
+	}
+	fmt.Fprintf(&b, "Jobs: %d success / %d failed / %d pending\n", success, failed, pending)
+	if len(failedNames) > 0 {
+		b.WriteString("Failed jobs:\n")
+		for _, name := range failedNames {
+			fmt.Fprintf(&b, "- %s\n", name)
+		}
+	}
+	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
+}
+
+// failingRunsForPR lists failing GitHub Actions workflow runs for a PR head commit.
+func failingRunsForPR(ctx context.Context, repo string, prNum int) (headSHA string, failed []workflowRun, truncated bool, err error) {
+	headSHA, err = prHeadSHA(ctx, repo, prNum)
+	if err != nil {
+		return "", nil, false, err
+	}
+
+	res := runRetry(ctx, "", "gh", "run", "list", "-R", repo,
+		"--commit", headSHA, "--limit", fmt.Sprintf("%d", ciRunListLimit),
+		"--json", "databaseId,workflowName,conclusion")
+	if res.err != nil {
+		return headSHA, nil, false, res.wrap("failed to list workflow runs")
+	}
+
+	var runs []workflowRun
+	if err := json.Unmarshal([]byte(res.stdout), &runs); err != nil {
+		return headSHA, nil, false, fmt.Errorf("failed to parse run list: %w", err)
+	}
+	truncated = len(runs) == ciRunListLimit
+
+	for _, r := range runs {
+		switch strings.ToLower(r.Conclusion) {
+		case "failure", "timed_out", "startup_failure", "action_required":
+			failed = append(failed, r)
+		}
+	}
+	return headSHA, failed, truncated, nil
 }
 
 func (s *Server) handleGetFailedLogs(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {

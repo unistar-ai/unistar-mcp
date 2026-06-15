@@ -24,6 +24,8 @@ type prAuthor struct {
 // fields and normalize them in ciState.
 type checkRollup struct {
 	Typename   string `json:"__typename"`
+	Name       string `json:"name"`
+	Context    string `json:"context"`
 	Status     string `json:"status"`     // CheckRun: QUEUED | IN_PROGRESS | COMPLETED
 	Conclusion string `json:"conclusion"` // CheckRun: SUCCESS | FAILURE | ...
 	State      string `json:"state"`      // StatusContext: SUCCESS | FAILURE | PENDING | ERROR
@@ -116,6 +118,12 @@ func (s *Server) prTools() []toolEntry {
 		{tool: diffTool, handler: s.handlePRDiff},
 		{tool: commentTool, handler: s.handlePostPRComment},
 	}
+}
+
+func (s *Server) allPRTools() []toolEntry {
+	tools := s.prTools()
+	tools = append(tools, s.prChatTools()...)
+	return tools
 }
 
 func (s *Server) handleListPRs(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {

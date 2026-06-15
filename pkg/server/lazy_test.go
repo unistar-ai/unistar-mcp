@@ -36,9 +36,11 @@ func TestToolListContainsAllTools(t *testing.T) {
 	out := resultText(t, res)
 
 	for _, name := range []string{
-		"pr_list_open", "pr_get_status", "pr_list_changed_files",
+		"pr_list_open", "pr_get_status", "pr_get_overview", "pr_get_merge_blockers",
+		"pr_list_waiting_review", "pr_list_changed_files",
 		"pr_list_stale", "pr_list_merged", "pr_get_diff", "pr_post_comment",
-		"ci_analyze_pr_failures", "ci_get_failed_logs", "ci_rerun_workflow", "ci_list_runs",
+		"ci_analyze_pr_failures", "ci_get_run_summary", "ci_get_failed_logs",
+		"ci_rerun_workflow", "ci_list_runs",
 		"pr_create_backport",
 		"issue_list_open", "issue_get", "issue_add_label",
 		"alert_list_open",
