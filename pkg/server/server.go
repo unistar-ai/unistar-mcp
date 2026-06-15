@@ -125,6 +125,8 @@ func (s *Server) registerTools() {
 	s.tools = append(s.tools, s.ciTools()...)
 	s.tools = append(s.tools, s.prTools()...)
 	s.tools = append(s.tools, s.backportTools()...)
+	s.tools = append(s.tools, s.issueTools()...)
+	s.tools = append(s.tools, s.securityTools()...)
 
 	if s.opts.LazyLoading {
 		logrus.Info("Lazy loading enabled: exposing tool_list/tool_describe/tool_call meta tools")

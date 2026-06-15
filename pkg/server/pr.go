@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -62,9 +63,58 @@ func (s *Server) prTools() []toolEntry {
 		mcp.WithNumber("pr_number", mcp.Required(), mcp.Description("The pull request number")),
 	)
 
+	changedFilesTool := mcp.NewTool("pr_list_changed_files",
+		mcp.WithDescription(
+			"List files changed in a pull request with additions/deletions counts. "+
+				"Useful for docs-only filtering and large-PR warnings."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form")),
+		mcp.WithNumber("pr_number", mcp.Required(), mcp.Description("The pull request number")),
+	)
+
+	staleTool := mcp.NewTool("pr_list_stale",
+		mcp.WithDescription(
+			"List open pull requests with no updates for at least N days (stale PR hygiene)."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form")),
+		mcp.WithNumber("days", mcp.Description("Minimum days since last update (default 7)")),
+		mcp.WithNumber("limit", mcp.Description("Maximum stale PRs to return (default 20)")),
+	)
+
+	mergedTool := mcp.NewTool("pr_list_merged",
+		mcp.WithDescription(
+			"List recently merged pull requests since a date (release notes / regression link)."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form")),
+		mcp.WithString("since", mcp.Description("ISO date YYYY-MM-DD or days ago as number string (default 14)")),
+		mcp.WithNumber("limit", mcp.Description("Maximum merged PRs to return (default 30)")),
+	)
+
+	diffTool := mcp.NewTool("pr_get_diff",
+		mcp.WithDescription(
+			"Fetch a capped unified diff for a pull request (light-review / breaking-sniff)."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form")),
+		mcp.WithNumber("pr_number", mcp.Required(), mcp.Description("The pull request number")),
+		mcp.WithNumber("max_bytes", mcp.Description("Maximum diff bytes to return (default 32000)")),
+	)
+
+	commentTool := mcp.NewTool("pr_post_comment",
+		mcp.WithDescription(
+			"Post a comment on a pull request (mutating — requires human approval in coworker)."),
+		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form")),
+		mcp.WithNumber("pr_number", mcp.Required(), mcp.Description("The pull request number")),
+		mcp.WithString("body", mcp.Required(), mcp.Description("Comment body (markdown supported)")),
+	)
+
 	return []toolEntry{
 		{tool: listTool, handler: s.handleListPRs},
 		{tool: statusTool, handler: s.handlePRStatus},
+		{tool: changedFilesTool, handler: s.handleListChangedFiles},
+		{tool: staleTool, handler: s.handleListStalePRs},
+		{tool: mergedTool, handler: s.handleListMergedPRs},
+		{tool: diffTool, handler: s.handlePRDiff},
+		{tool: commentTool, handler: s.handlePostPRComment},
 	}
 }
 
@@ -161,6 +211,250 @@ func (s *Server) handlePRStatus(ctx context.Context, request mcp.CallToolRequest
 	fmt.Fprintf(&b, "Mergeable: %s", mergeableState(pr.Mergeable, fail, pending))
 
 	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
+}
+
+type prFileChange struct {
+	Filename  string `json:"filename"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+	Status    string `json:"status"`
+}
+
+func (s *Server) handleListChangedFiles(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	repo, err := request.RequireString("repo")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	prNumFloat, err := request.RequireFloat("pr_number")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	prNum := int(prNumFloat)
+
+	res := runRetry(ctx, "", "gh", "api",
+		fmt.Sprintf("repos/%s/pulls/%d/files", repo, prNum),
+		"--paginate", "--jq", ".[] | {filename, additions, deletions, status}")
+	if res.err != nil {
+		return mcp.NewToolResultError(res.wrap("failed to list changed files").Error()), nil
+	}
+
+	lines := strings.Split(strings.TrimSpace(res.stdout), "\n")
+	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
+		return mcp.NewToolResultText(fmt.Sprintf("No changed files for PR #%d in %s.", prNum, repo)), nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d changed file(s) in %s#%d:\n", len(lines), repo, prNum)
+	totalAdd, totalDel := 0, 0
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		var f prFileChange
+		if err := json.Unmarshal([]byte(line), &f); err != nil {
+			b.WriteString(line)
+			b.WriteByte('\n')
+			continue
+		}
+		totalAdd += f.Additions
+		totalDel += f.Deletions
+		fmt.Fprintf(&b, "%s  +%d/-%d  (%s)\n", f.Filename, f.Additions, f.Deletions, f.Status)
+	}
+	fmt.Fprintf(&b, "totals: +%d/-%d", totalAdd, totalDel)
+	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
+}
+
+type prUpdatedRow struct {
+	Number    int      `json:"number"`
+	Title     string   `json:"title"`
+	Author    prAuthor `json:"author"`
+	IsDraft   bool     `json:"isDraft"`
+	UpdatedAt string   `json:"updatedAt"`
+}
+
+func (s *Server) handleListStalePRs(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	repo, err := request.RequireString("repo")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	days := int(request.GetFloat("days", 7))
+	if days <= 0 {
+		days = 7
+	}
+	limit := int(request.GetFloat("limit", defaultPRListLimit))
+	if limit <= 0 {
+		limit = defaultPRListLimit
+	}
+	cutoff := time.Now().AddDate(0, 0, -days)
+
+	res := runRetry(ctx, "", "gh", "pr", "list", "-R", repo, "--state", "open",
+		"--limit", "100",
+		"--json", "number,title,author,isDraft,updatedAt")
+	if res.err != nil {
+		return mcp.NewToolResultError(res.wrap("failed to list pull requests").Error()), nil
+	}
+
+	var prs []prUpdatedRow
+	if err := json.Unmarshal([]byte(res.stdout), &prs); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to parse PR list: %s", err)), nil
+	}
+
+	var stale []prUpdatedRow
+	for _, pr := range prs {
+		if pr.IsDraft {
+			continue
+		}
+		updated, err := time.Parse(time.RFC3339, pr.UpdatedAt)
+		if err != nil {
+			continue
+		}
+		if updated.Before(cutoff) {
+			stale = append(stale, pr)
+		}
+	}
+	if len(stale) == 0 {
+		return mcp.NewToolResultText(fmt.Sprintf("No stale open PRs (>%dd without update) in %s.", days, repo)), nil
+	}
+	if len(stale) > limit {
+		stale = stale[:limit]
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d stale open PR(s) in %s (no update in %d+ days):\n", len(stale), repo, days)
+	for _, pr := range stale {
+		fmt.Fprintf(&b, "#%d  %s  @%s  updated:%s\n",
+			pr.Number, pr.Title, pr.Author.Login, pr.UpdatedAt[:10])
+	}
+	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
+}
+
+type prMergedRow struct {
+	Number   int      `json:"number"`
+	Title    string   `json:"title"`
+	Author   prAuthor `json:"author"`
+	MergedAt string   `json:"mergedAt"`
+}
+
+func mergedSinceDate(since string) (string, error) {
+	if since == "" {
+		return time.Now().AddDate(0, 0, -14).Format("2006-01-02"), nil
+	}
+	if len(since) == 10 && since[4] == '-' {
+		return since, nil
+	}
+	var d int
+	if _, err := fmt.Sscanf(since, "%d", &d); err != nil {
+		return "", fmt.Errorf("since must be YYYY-MM-DD or days as integer, got %q", since)
+	}
+	if d <= 0 {
+		d = 14
+	}
+	return time.Now().AddDate(0, 0, -d).Format("2006-01-02"), nil
+}
+
+func (s *Server) handleListMergedPRs(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	repo, err := request.RequireString("repo")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	sinceRaw := request.GetString("since", "")
+	sinceDate, err := mergedSinceDate(sinceRaw)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	limit := int(request.GetFloat("limit", 30))
+	if limit <= 0 {
+		limit = 30
+	}
+
+	search := fmt.Sprintf("merged:>=%s", sinceDate)
+	res := runRetry(ctx, "", "gh", "pr", "list", "-R", repo, "--state", "merged",
+		"--limit", fmt.Sprintf("%d", limit),
+		"--search", search,
+		"--json", "number,title,author,mergedAt")
+	if res.err != nil {
+		return mcp.NewToolResultError(res.wrap("failed to list merged PRs").Error()), nil
+	}
+
+	var prs []prMergedRow
+	if err := json.Unmarshal([]byte(res.stdout), &prs); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to parse merged PR list: %s", err)), nil
+	}
+	if len(prs) == 0 {
+		return mcp.NewToolResultText(fmt.Sprintf("No merged PRs in %s since %s.", repo, sinceDate)), nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d merged PR(s) in %s since %s:\n", len(prs), repo, sinceDate)
+	for _, pr := range prs {
+		merged := pr.MergedAt
+		if len(merged) >= 10 {
+			merged = merged[:10]
+		}
+		fmt.Fprintf(&b, "#%d  %s  @%s  merged:%s\n",
+			pr.Number, pr.Title, pr.Author.Login, merged)
+	}
+	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
+}
+
+func (s *Server) handlePRDiff(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	repo, err := request.RequireString("repo")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	prNumFloat, err := request.RequireFloat("pr_number")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	prNum := int(prNumFloat)
+	maxBytes := int(request.GetFloat("max_bytes", 32000))
+	if maxBytes <= 0 {
+		maxBytes = 32000
+	}
+
+	res := runRetry(ctx, "", "gh", "pr", "diff", fmt.Sprintf("%d", prNum), "-R", repo)
+	if res.err != nil {
+		return mcp.NewToolResultError(res.wrap("failed to fetch PR diff").Error()), nil
+	}
+	diff := res.stdout
+	truncated := false
+	if len(diff) > maxBytes {
+		diff = diff[:maxBytes]
+		truncated = true
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Diff for %s#%d (%d bytes", repo, prNum, len(diff))
+	if truncated {
+		b.WriteString(", truncated")
+	}
+	b.WriteString("):\n\n")
+	b.WriteString(diff)
+	if truncated {
+		b.WriteString("\n\n[diff truncated at max_bytes]")
+	}
+	return mcp.NewToolResultText(b.String()), nil
+}
+
+func (s *Server) handlePostPRComment(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	repo, err := request.RequireString("repo")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	prNumFloat, err := request.RequireFloat("pr_number")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	body, err := request.RequireString("body")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	prNum := int(prNumFloat)
+
+	res := runRetry(ctx, "", "gh", "pr", "comment", fmt.Sprintf("%d", prNum), "-R", repo, "--body", body)
+	if res.err != nil {
+		return mcp.NewToolResultError(res.wrap("failed to post PR comment").Error()), nil
+	}
+	return mcp.NewToolResultText(fmt.Sprintf("Comment posted on %s#%d.", repo, prNum)), nil
 }
 
 // tallyChecks counts passing, failing, and pending checks in a rollup.
