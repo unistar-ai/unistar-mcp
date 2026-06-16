@@ -22,7 +22,7 @@ intentionally blocked in this project.
 | `ci_rerun_workflow` | Rerun the failed jobs of a run (mutating) | `repo`, `run_id` |
 | `pr_create_backport` | Cherry-pick a merged PR onto a branch, open the backport PR (mutating) | `repo`, `pr_number`, `target_branch` |
 
-`repo` is always `owner/repo` (e.g. `Kong/kong-ee`). `pr_list_open` lists all
+`repo` is always `owner/repo` (e.g. `acme/widget`). `pr_list_open` lists all
 authors by default, newest first, bounded by `limit` (default 20); pass
 `author="@me"` for your own PRs or a GitHub login to filter by user.
 
