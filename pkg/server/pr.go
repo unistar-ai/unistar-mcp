@@ -98,7 +98,7 @@ func (s *Server) prTools() []toolEntry {
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form")),
 		mcp.WithNumber("pr_number", mcp.Required(), mcp.Description("The pull request number")),
-		mcp.WithNumber("max_bytes", mcp.Description("Maximum diff bytes to return (default 32000)")),
+		mcp.WithNumber("max_bytes", mcp.Description("Maximum diff bytes to return (default 48000)")),
 	)
 
 	commentTool := mcp.NewTool("pr_post_comment",
@@ -415,9 +415,9 @@ func (s *Server) handlePRDiff(ctx context.Context, request mcp.CallToolRequest) 
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	prNum := int(prNumFloat)
-	maxBytes := int(request.GetFloat("max_bytes", 32000))
+	maxBytes := int(request.GetFloat("max_bytes", 48000))
 	if maxBytes <= 0 {
-		maxBytes = 32000
+		maxBytes = 48000
 	}
 
 	res := runRetry(ctx, "", "gh", "pr", "diff", fmt.Sprintf("%d", prNum), "-R", repo)

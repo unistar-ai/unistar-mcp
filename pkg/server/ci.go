@@ -137,13 +137,18 @@ func (s *Server) handleAnalyzeCI(ctx context.Context, request mcp.CallToolReques
 		fmt.Fprintf(&b, "(only the most recent %d runs were inspected; there may be more)\n", ciRunListLimit)
 	}
 	for _, r := range failed {
-		fmt.Fprintf(&b, "%d  %s  %s\n", r.DatabaseID, r.WorkflowName, strings.ToLower(r.Conclusion))
+		label := strings.ToLower(strings.TrimSpace(r.Conclusion))
+		if label == "" {
+			label = strings.ToLower(strings.TrimSpace(r.Status))
+		}
+		fmt.Fprintf(&b, "%d  %s  %s\n", r.DatabaseID, r.WorkflowName, label)
 	}
 
 	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
 }
 
 type runJob struct {
+	DatabaseID int64  `json:"databaseId"`
 	Name       string `json:"name"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
@@ -171,15 +176,9 @@ func (s *Server) handleGetRunSummary(ctx context.Context, request mcp.CallToolRe
 	}
 	runID := int64(runIDFloat)
 
-	res := runRetry(ctx, "", "gh", "run", "view", fmt.Sprintf("%d", runID), "-R", repo,
-		"--json", "databaseId,workflowName,status,conclusion,createdAt,updatedAt,headBranch,jobs")
-	if res.err != nil {
-		return mcp.NewToolResultError(res.wrap("failed to fetch run summary").Error()), nil
-	}
-
-	var run runSummary
-	if err := json.Unmarshal([]byte(res.stdout), &run); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to parse run summary: %s", err)), nil
+	run, err := loadRunSummary(ctx, repo, runID)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	conclusion := strings.ToLower(strings.TrimSpace(run.Conclusion))
@@ -195,28 +194,17 @@ func (s *Server) handleGetRunSummary(ctx context.Context, request mcp.CallToolRe
 		fmt.Fprintf(&b, "Started: %s  Updated: %s\n", run.CreatedAt, run.UpdatedAt)
 	}
 
-	var failed, pending, success int
-	var failedNames []string
-	for _, j := range run.Jobs {
-		jc := strings.ToLower(strings.TrimSpace(j.Conclusion))
-		if jc == "" {
-			jc = strings.ToLower(strings.TrimSpace(j.Status))
-		}
-		switch jc {
-		case "success", "skipped", "neutral":
-			success++
-		case "failure", "timed_out", "cancelled", "startup_failure", "action_required":
-			failed++
-			failedNames = append(failedNames, j.Name)
-		default:
-			pending++
-		}
-	}
+	success, failed, pending, failedJobs := classifyRunJobs(run.Jobs)
 	fmt.Fprintf(&b, "Jobs: %d success / %d failed / %d pending\n", success, failed, pending)
-	if len(failedNames) > 0 {
+	if len(failedJobs) > 0 {
 		b.WriteString("Failed jobs:\n")
-		for _, name := range failedNames {
-			fmt.Fprintf(&b, "- %s\n", name)
+		for _, j := range failedJobs {
+			fmt.Fprintf(&b, "- %s  (job_id=%d)\n", j.Name, j.DatabaseID)
+		}
+		if runStillInProgress(run) && failed > 0 {
+			b.WriteString(
+				"Note: run is still in progress; ci_get_failed_logs can fetch logs for failed jobs that have finished.\n",
+			)
 		}
 	}
 	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
@@ -231,7 +219,7 @@ func failingRunsForPR(ctx context.Context, repo string, prNum int) (headSHA stri
 
 	res := runRetry(ctx, "", "gh", "run", "list", "-R", repo,
 		"--commit", headSHA, "--limit", fmt.Sprintf("%d", ciRunListLimit),
-		"--json", "databaseId,workflowName,conclusion")
+		"--json", "databaseId,workflowName,conclusion,status")
 	if res.err != nil {
 		return headSHA, nil, false, res.wrap("failed to list workflow runs")
 	}
@@ -243,10 +231,32 @@ func failingRunsForPR(ctx context.Context, repo string, prNum int) (headSHA stri
 	truncated = len(runs) == ciRunListLimit
 
 	for _, r := range runs {
-		switch strings.ToLower(r.Conclusion) {
+		conc := strings.ToLower(strings.TrimSpace(r.Conclusion))
+		switch conc {
 		case "failure", "timed_out", "startup_failure", "action_required":
 			failed = append(failed, r)
+			continue
 		}
+		if conc != "" {
+			continue
+		}
+		st := strings.ToLower(strings.TrimSpace(r.Status))
+		if !runStatusInProgress(st) {
+			continue
+		}
+		run, err := loadRunSummary(ctx, repo, r.DatabaseID)
+		if err != nil {
+			continue
+		}
+		_, failCount, _, failJobs := classifyRunJobs(run.Jobs)
+		if failCount == 0 {
+			continue
+		}
+		r.Conclusion = "failure (run in progress)"
+		if len(failJobs) > 0 {
+			r.Status = fmt.Sprintf("%s, %d failed job(s)", st, failCount)
+		}
+		failed = append(failed, r)
 	}
 	return headSHA, failed, truncated, nil
 }
@@ -270,18 +280,30 @@ func (s *Server) handleGetFailedLogs(ctx context.Context, request mcp.CallToolRe
 		maxLines = 0
 	}
 
-	res := runRetry(ctx, "", "gh", "run", "view", fmt.Sprintf("%d", runID),
-		"-R", repo, "--log-failed")
-	if res.err != nil {
-		return mcp.NewToolResultError(res.wrap("failed to fetch failed logs").Error()), nil
+	logText, failedJobs, err := fetchFailedRunLogs(ctx, repo, runID)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	if strings.TrimSpace(res.stdout) == "" {
+	if strings.TrimSpace(logText) == "" {
+		if len(failedJobs) > 0 {
+			var names []string
+			for _, j := range failedJobs {
+				state := jobEffectiveConclusion(j)
+				if !jobLogsReady(j) {
+					state += ", logs pending"
+				}
+				names = append(names, fmt.Sprintf("%s (job_id=%d, %s)", j.Name, j.DatabaseID, state))
+			}
+			return mcp.NewToolResultText(fmt.Sprintf(
+				"Run %d still has %d failed job(s) but no log output yet: %s",
+				runID, len(failedJobs), strings.Join(names, "; "))), nil
+		}
 		return mcp.NewToolResultText(fmt.Sprintf(
 			"Run %d has no failed-step logs (still running or cancelled).", runID)), nil
 	}
 
-	clean := cleanGHLog(res.stdout)
+	clean := cleanGHLog(logText)
 
 	var body string
 	var mode string
@@ -384,6 +406,162 @@ func (s *Server) handleRerunCI(ctx context.Context, request mcp.CallToolRequest)
 	return mcp.NewToolResultText(fmt.Sprintf("Reran failed jobs in run %d.", runID)), nil
 }
 
+func loadRunSummary(ctx context.Context, repo string, runID int64) (runSummary, error) {
+	res := runRetry(ctx, "", "gh", "run", "view", fmt.Sprintf("%d", runID), "-R", repo,
+		"--json", "databaseId,workflowName,status,conclusion,createdAt,updatedAt,headBranch,jobs")
+	if res.err != nil {
+		return runSummary{}, res.wrap("failed to fetch run summary")
+	}
+	var run runSummary
+	if err := json.Unmarshal([]byte(res.stdout), &run); err != nil {
+		return runSummary{}, fmt.Errorf("failed to parse run summary: %w", err)
+	}
+	return run, nil
+}
+
+func jobEffectiveConclusion(j runJob) string {
+	jc := strings.ToLower(strings.TrimSpace(j.Conclusion))
+	if jc == "" {
+		jc = strings.ToLower(strings.TrimSpace(j.Status))
+	}
+	return jc
+}
+
+func isFailedJobConclusion(jc string) bool {
+	switch jc {
+	case "failure", "timed_out", "cancelled", "startup_failure", "action_required":
+		return true
+	default:
+		return false
+	}
+}
+
+func classifyRunJobs(jobs []runJob) (success, failed, pending int, failedJobs []runJob) {
+	for _, j := range jobs {
+		switch jobEffectiveConclusion(j) {
+		case "success", "skipped", "neutral":
+			success++
+		case "failure", "timed_out", "cancelled", "startup_failure", "action_required":
+			failed++
+			failedJobs = append(failedJobs, j)
+		default:
+			pending++
+		}
+	}
+	return success, failed, pending, failedJobs
+}
+
+func runStatusInProgress(status string) bool {
+	switch status {
+	case "queued", "in_progress", "pending", "requested", "waiting":
+		return true
+	default:
+		return false
+	}
+}
+
+func runStillInProgress(run runSummary) bool {
+	st := strings.ToLower(strings.TrimSpace(run.Status))
+	if runStatusInProgress(st) {
+		return true
+	}
+	return strings.ToLower(strings.TrimSpace(run.Conclusion)) == ""
+}
+
+// ghRunLogUnavailableYet reports when gh refuses run-level logs because the
+// workflow is still running (or returned no output yet). Caller should fall
+// back to per-job log fetch instead of surfacing a tool error.
+func ghRunLogUnavailableYet(res runResult) bool {
+	if res.err == nil {
+		return strings.TrimSpace(res.stdout) == ""
+	}
+	low := strings.ToLower(res.combined())
+	return strings.Contains(low, "still in progress") ||
+		strings.Contains(low, "log will be available when it is complete")
+}
+
+// fetchFailedRunLogs tries run-level --log-failed first, then per failed job when the
+// workflow run is still in progress (gh errors or returns empty until the run completes).
+func fetchFailedRunLogs(ctx context.Context, repo string, runID int64) (string, []runJob, error) {
+	res := runRetry(ctx, "", "gh", "run", "view", fmt.Sprintf("%d", runID),
+		"-R", repo, "--log-failed")
+	if res.err == nil && strings.TrimSpace(res.stdout) != "" {
+		return res.stdout, nil, nil
+	}
+	if res.err != nil && !ghRunLogUnavailableYet(res) {
+		return "", nil, res.wrap("failed to fetch failed logs")
+	}
+
+	return fetchFailedJobLogs(ctx, repo, runID)
+}
+
+func fetchFailedJobLogs(ctx context.Context, repo string, runID int64) (string, []runJob, error) {
+	run, err := loadRunSummary(ctx, repo, runID)
+	if err != nil {
+		return "", nil, err
+	}
+	_, _, _, failedJobs := classifyRunJobs(run.Jobs)
+	if len(failedJobs) == 0 {
+		return "", nil, nil
+	}
+
+	var parts []string
+	for _, job := range failedJobs {
+		raw, fetchErr := fetchFailedJobLogText(ctx, repo, runID, job)
+		if fetchErr != nil {
+			parts = append(parts, fmt.Sprintf("=== job: %s (job_id=%d) ===\nfailed to fetch logs: %s",
+				job.Name, job.DatabaseID, fetchErr.Error()))
+			continue
+		}
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("=== job: %s (job_id=%d) ===\n%s",
+			job.Name, job.DatabaseID, strings.TrimSpace(raw)))
+	}
+	return strings.Join(parts, "\n\n"), failedJobs, nil
+}
+
+// fetchFailedJobLogText loads logs for one failed job. Prefer gh's failed-step
+// filter; the Actions job logs API returns the entire job log (all steps) and
+// is only used as a last resort while a run is still in progress.
+func fetchFailedJobLogText(ctx context.Context, repo string, runID int64, job runJob) (string, error) {
+	jobRes := runRetry(ctx, "", "gh", "run", "view", fmt.Sprintf("%d", runID),
+		"-R", repo, "--job", fmt.Sprintf("%d", job.DatabaseID), "--log-failed")
+	if jobRes.err == nil && strings.TrimSpace(jobRes.stdout) != "" {
+		return jobRes.stdout, nil
+	}
+	if jobRes.err != nil && !ghRunLogUnavailableYet(jobRes) {
+		return "", jobRes.wrap(fmt.Sprintf("fetch failed-step logs for job %d", job.DatabaseID))
+	}
+
+	jobRes = runRetry(ctx, "", "gh", "run", "view", fmt.Sprintf("%d", runID),
+		"-R", repo, "--job", fmt.Sprintf("%d", job.DatabaseID), "--log")
+	if jobRes.err == nil && strings.TrimSpace(jobRes.stdout) != "" {
+		return jobRes.stdout, nil
+	}
+	if jobRes.err != nil && !ghRunLogUnavailableYet(jobRes) {
+		return "", jobRes.wrap(fmt.Sprintf("fetch logs for job %d", job.DatabaseID))
+	}
+
+	if !jobLogsReady(job) {
+		return "", nil
+	}
+	res := runRetry(ctx, "", "gh", "api",
+		fmt.Sprintf("repos/%s/actions/jobs/%d/logs", repo, job.DatabaseID))
+	if res.err == nil && strings.TrimSpace(res.stdout) != "" {
+		return res.stdout, nil
+	}
+	if res.err != nil && !ghRunLogUnavailableYet(res) {
+		return "", res.wrap(fmt.Sprintf("fetch logs for job %d", job.DatabaseID))
+	}
+	return "", nil
+}
+
+func jobLogsReady(job runJob) bool {
+	return strings.ToLower(strings.TrimSpace(job.Status)) == "completed"
+}
+
 const (
 	errBudget      = 6_000 // max bytes of extracted error lines returned
 	fallbackTail   = 4_000 // max bytes returned when no error lines are recognized
@@ -394,33 +572,90 @@ const (
 // errLineRE matches lines that typically carry the actual failure signal.
 var errLineRE = regexp.MustCompile(`(?i)(\berror\b|\bfailed\b|\bfailure\b|\bpanic\b|\bfatal\b|exception|traceback|assert|\bundefined\b|cannot |not found|exit code [1-9]|exit status [1-9]|✗|\bFAIL\b|\[error\])`)
 
+func isNoiseErrorLine(ln string) bool {
+	low := strings.ToLower(ln)
+	if strings.Contains(ln, "##[warning]") {
+		return true
+	}
+	if strings.Contains(low, "unable to reserve cache") {
+		return true
+	}
+	if strings.Contains(low, "failed to save:") && strings.Contains(low, "cache") {
+		return true
+	}
+	return false
+}
+
 // extractErrors returns the error lines of a cleaned log, each with a little
 // surrounding context, and the number of matched lines. Gaps between kept
 // regions are marked with a single "…" line; consecutive duplicate lines are
 // collapsed. When nothing matches it returns ("", 0).
 func extractErrors(clean string) (string, int) {
 	lines := strings.Split(clean, "\n")
+	if body, n := extractMarkedLines(lines, "##[error]"); n > 0 {
+		return body, n
+	}
+	body, matches := extractRegexLines(lines, errLineRE, isNoiseErrorLine)
+	if matches == 0 {
+		return "", 0
+	}
+	return preferLastErrorCluster(body), matches
+}
+
+func extractMarkedLines(lines []string, marker string) (string, int) {
 	keep := make([]bool, len(lines))
 	matches := 0
 	for i, ln := range lines {
-		if errLineRE.MatchString(ln) {
-			matches++
-			lo, hi := i-errContext, i+errContext
-			if lo < 0 {
-				lo = 0
-			}
-			if hi >= len(lines) {
-				hi = len(lines) - 1
-			}
-			for j := lo; j <= hi; j++ {
-				keep[j] = true
-			}
+		if !strings.Contains(ln, marker) {
+			continue
+		}
+		matches++
+		lo, hi := i-errContext, i+errContext
+		if lo < 0 {
+			lo = 0
+		}
+		if hi >= len(lines) {
+			hi = len(lines) - 1
+		}
+		for j := lo; j <= hi; j++ {
+			keep[j] = true
 		}
 	}
 	if matches == 0 {
 		return "", 0
 	}
+	return joinKeptLines(lines, keep), matches
+}
 
+func extractRegexLines(lines []string, re *regexp.Regexp, skip func(string) bool) (string, int) {
+	keep := make([]bool, len(lines))
+	matches := 0
+	for i, ln := range lines {
+		if skip != nil && skip(ln) {
+			continue
+		}
+		if !re.MatchString(ln) {
+			continue
+		}
+		matches++
+		lo, hi := i-errContext, i+errContext
+		if lo < 0 {
+			lo = 0
+		}
+		if hi >= len(lines) {
+			hi = len(lines) - 1
+		}
+		for j := lo; j <= hi; j++ {
+			keep[j] = true
+		}
+	}
+	if matches == 0 {
+		return "", 0
+	}
+	return joinKeptLines(lines, keep), matches
+}
+
+func joinKeptLines(lines []string, keep []bool) string {
 	var b strings.Builder
 	gapOpen := false
 	last := ""
@@ -433,6 +668,9 @@ func extractErrors(clean string) (string, int) {
 			continue
 		}
 		gapOpen = true
+		if isNoiseErrorLine(ln) && !strings.Contains(ln, "##[error]") {
+			continue
+		}
 		if ln == last {
 			continue // collapse consecutive duplicates
 		}
@@ -440,25 +678,40 @@ func extractErrors(clean string) (string, int) {
 		b.WriteByte('\n')
 		last = ln
 	}
-	return strings.TrimSpace(b.String()), matches
+	return strings.TrimSpace(b.String())
+}
+
+// preferLastErrorCluster keeps the final error region when extractErrors matched
+// multiple disjoint areas (e.g. setup noise vs the real failing step).
+func preferLastErrorCluster(body string) string {
+	parts := strings.Split(body, "…\n")
+	last := strings.TrimSpace(parts[len(parts)-1])
+	if last == "" {
+		return body
+	}
+	return last
 }
 
 var (
 	ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 	// gh --log-failed prefixes every line with "<job>\t<step>\t<RFC3339 ts> ".
 	logPrefixRE = regexp.MustCompile(`^[^\t]*\t[^\t]*\t\d{4}-\d{2}-\d{2}T[\d:.]+Z `)
+	// Raw Actions job log API lines: "<RFC3339 ts> message" (no job/step columns).
+	rawLogPrefixRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s*`)
 )
 
 // cleanGHLog strips ANSI escape codes and gh's per-line job/step/timestamp
 // prefixes, and collapses runs of blank lines, to cut the payload sent back to
 // the agent without losing the error content.
 func cleanGHLog(s string) string {
+	s = strings.TrimPrefix(s, "\uFEFF")
 	s = ansiRE.ReplaceAllString(s, "")
 
 	var b strings.Builder
 	blank := 0
 	for _, line := range strings.Split(s, "\n") {
 		line = logPrefixRE.ReplaceAllString(line, "")
+		line = rawLogPrefixRE.ReplaceAllString(line, "")
 		line = strings.TrimRight(line, "\r ")
 		if line == "" {
 			if blank > 0 {
