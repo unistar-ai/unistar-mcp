@@ -30,6 +30,7 @@ func (s *Server) prChatTools() []toolEntry {
 	waitingTool := mcp.NewTool("pr_list_waiting_review",
 		mcp.WithDescription(
 			"List open PRs with passing CI that still need review (not draft). "+
+				"Uses gh search for review:required, then filters to CI-green PRs. "+
 				"Same compact line format as pr_list_open."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("repo", mcp.Required(), mcp.Description("Repository in owner/repo form")),
@@ -54,17 +55,14 @@ func (s *Server) handlePROverview(ctx context.Context, request mcp.CallToolReque
 	}
 	prNum := int(prNumFloat)
 
-	res := runRetry(ctx, "", "gh", "pr", "view", fmt.Sprintf("%d", prNum), "-R", repo,
-		"--json", "number,title,author,state,isDraft,mergeable,reviewDecision,statusCheckRollup")
-	if res.err != nil {
-		return mcp.NewToolResultError(res.wrap("failed to fetch PR overview").Error()), nil
+	text, err := s.buildPROverviewText(ctx, repo, prNum)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
+	return mcp.NewToolResultText(text), nil
+}
 
-	var pr pullRequest
-	if err := json.Unmarshal([]byte(res.stdout), &pr); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to parse PR overview: %s", err)), nil
-	}
-
+func formatPROverviewText(ctx context.Context, repo string, prNum int, pr pullRequest) (string, error) {
 	pass, fail, pending := tallyChecks(pr.StatusCheck)
 	fileCount, totalAdd, totalDel, docsOnly, fileErr := prFilesSummary(ctx, repo, prNum)
 
@@ -76,6 +74,9 @@ func (s *Server) handlePROverview(ctx context.Context, request mcp.CallToolReque
 	}
 	b.WriteByte('\n')
 	fmt.Fprintf(&b, "CI: %d passing / %d failing / %d pending\n", pass, fail, pending)
+	if ext := formatExternalCheckSummary(pr.StatusCheck); ext != "" {
+		b.WriteString(ext)
+	}
 	fmt.Fprintf(&b, "Review: %s\n", reviewState(pr.ReviewDecision))
 	fmt.Fprintf(&b, "Mergeable: %s\n", mergeableState(pr.Mergeable, fail, pending))
 	if fileErr != nil {
@@ -103,7 +104,7 @@ func (s *Server) handlePROverview(ctx context.Context, request mcp.CallToolReque
 		}
 	}
 
-	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
+	return strings.TrimSpace(b.String()), nil
 }
 
 func (s *Server) handlePRMergeBlockers(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -117,15 +118,23 @@ func (s *Server) handlePRMergeBlockers(ctx context.Context, request mcp.CallTool
 	}
 	prNum := int(prNumFloat)
 
+	text, err := buildPRMergeBlockersText(ctx, repo, prNum)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(text), nil
+}
+
+func buildPRMergeBlockersText(ctx context.Context, repo string, prNum int) (string, error) {
 	res := runRetry(ctx, "", "gh", "pr", "view", fmt.Sprintf("%d", prNum), "-R", repo,
 		"--json", "number,title,author,isDraft,mergeable,reviewDecision,statusCheckRollup")
 	if res.err != nil {
-		return mcp.NewToolResultError(res.wrap("failed to fetch PR blockers").Error()), nil
+		return "", res.wrap("failed to fetch PR blockers")
 	}
 
 	var pr pullRequest
 	if err := json.Unmarshal([]byte(res.stdout), &pr); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to parse PR blockers: %s", err)), nil
+		return "", fmt.Errorf("failed to parse PR blockers: %w", err)
 	}
 
 	pass, fail, pending := tallyChecks(pr.StatusCheck)
@@ -149,8 +158,7 @@ func (s *Server) handlePRMergeBlockers(ctx context.Context, request mcp.CallTool
 			fmt.Fprintf(&b, "- %s\n", bl)
 		}
 	}
-
-	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
+	return strings.TrimSpace(b.String()), nil
 }
 
 func (s *Server) handleListWaitingReview(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -163,20 +171,22 @@ func (s *Server) handleListWaitingReview(ctx context.Context, request mcp.CallTo
 		limit = defaultPRListLimit
 	}
 
-	// Fetch extra rows then filter — gh has no native review+CI filter.
-	fetchLimit := limit * 5
-	if fetchLimit < 50 {
-		fetchLimit = 50
+	// Server-side review filter via gh search; CI pass/pending filter remains client-side.
+	fetchLimit := limit * 3
+	if fetchLimit < limit {
+		fetchLimit = limit
 	}
 	if fetchLimit > 100 {
 		fetchLimit = 100
 	}
 
-	res := runRetry(ctx, "", "gh", "pr", "list", "-R", repo, "--state", "open",
+	res := runRetry(ctx, "", "gh", "search", "prs",
+		"--repo", repo,
+		"is:pr is:open review:required",
 		"--limit", fmt.Sprintf("%d", fetchLimit),
 		"--json", "number,title,author,isDraft,reviewDecision,statusCheckRollup")
 	if res.err != nil {
-		return mcp.NewToolResultError(res.wrap("failed to list pull requests").Error()), nil
+		return mcp.NewToolResultError(res.wrap("failed to search pull requests").Error()), nil
 	}
 
 	var prs []pullRequest

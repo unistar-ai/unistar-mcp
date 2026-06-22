@@ -140,12 +140,14 @@ func clipForLog(s string, limit int) string {
 // most common failure causes (missing binary, auth, not-found) so the agent
 // gets actionable guidance instead of a raw stack of gh output.
 func (r runResult) wrap(action string) error {
+	detail := tail(r.combined(), errDetailBudget)
+
 	// Binary missing on PATH.
 	var execErr *exec.Error
 	if errors.As(r.err, &execErr) && errors.Is(execErr.Err, exec.ErrNotFound) {
-		return fmt.Errorf("%s: %q is not installed or not on PATH. "+
-			"Install the GitHub CLI (https://cli.github.com/) and git, then retry",
-			action, execErr.Name)
+		return fmt.Errorf("%s",
+			formatToolError(ErrUnavailable, action+": "+execErr.Name+" is not installed or not on PATH",
+				"Install the GitHub CLI (https://cli.github.com/) and git, then retry"))
 	}
 
 	low := strings.ToLower(r.combined())
@@ -153,39 +155,40 @@ func (r runResult) wrap(action string) error {
 	// Rate limits must be checked before the HTTP 403 case below: GitHub
 	// rejects secondary-rate-limited requests with a 403.
 	case r.rateLimited():
-		return fmt.Errorf("%s: GitHub rate limit reached. "+
-			"Do not retry immediately — wait at least a minute, then retry the same call. "+
-			"Details:\n%s", action, tail(r.stderr, errDetailBudget))
+		return fmt.Errorf("%s",
+			formatToolError(ErrRateLimit, action+": GitHub rate limit reached",
+				"Wait at least a minute, then retry the same call — do not hammer the API. Details: "+tail(r.stderr, errDetailBudget)))
 
 	case strings.Contains(low, "gh auth login"),
 		strings.Contains(low, "authentication"),
 		strings.Contains(low, "not logged in"),
 		strings.Contains(low, "http 401"),
 		strings.Contains(low, "bad credentials"):
-		return fmt.Errorf("%s: GitHub authentication failed. "+
-			"Run `gh auth login`, or set the GH_TOKEN environment variable for the server. "+
-			"Details:\n%s", action, r.combined())
+		return fmt.Errorf("%s",
+			formatToolError(ErrAuth, action+": GitHub authentication failed",
+				"Run `gh auth login`, or set GH_TOKEN / GITHUB_TOKEN for the server. Details: "+detail))
 
 	case strings.Contains(low, "could not resolve to a repository"),
 		strings.Contains(low, "http 404"),
 		strings.Contains(low, "not found"):
-		return fmt.Errorf("%s: repository, PR, or run not found (check the owner/repo and IDs). "+
-			"Details:\n%s", action, r.combined())
+		return fmt.Errorf("%s",
+			formatToolError(ErrNotFound, action+": repository, PR, or run not found",
+				"Check owner/repo and IDs (pr_number, run_id). Details: "+detail))
 
 	case strings.Contains(low, "http 403"),
 		strings.Contains(low, "permission"),
 		strings.Contains(low, "forbidden"):
-		return fmt.Errorf("%s: permission denied — the token lacks access to this repository. "+
-			"Details:\n%s", action, r.combined())
+		return fmt.Errorf("%s",
+			formatToolError(ErrForbidden, action+": permission denied",
+				"The token lacks access to this repository. Details: "+detail))
 
 	case r.transient():
-		return fmt.Errorf("%s: GitHub returned a temporary server error. "+
-			"This is not a problem with the request — retry the same call in a few seconds. "+
-			"Details:\n%s", action, tail(r.stderr, errDetailBudget))
+		return fmt.Errorf("%s",
+			formatToolError(ErrTransient, action+": GitHub returned a temporary server error",
+				"Retry the same call in a few seconds. Details: "+tail(r.stderr, errDetailBudget)))
 
 	default:
-		// Cap the details: a command that fails mid-download can leave
-		// megabytes of partial output in stdout.
-		return fmt.Errorf("%s (exit %d): %s", action, r.exitCode, tail(r.combined(), errDetailBudget))
+		return fmt.Errorf("%s",
+			formatToolError(ErrGeneric, fmt.Sprintf("%s (exit %d)", action, r.exitCode), detail))
 	}
 }

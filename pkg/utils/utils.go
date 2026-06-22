@@ -4,7 +4,6 @@ import (
 	"io"
 	"os"
 
-	"github.com/STARRY-S/simple-logrus-formatter/pkg/formatter"
 	"github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/writer"
 	"golang.org/x/term"
@@ -21,17 +20,15 @@ var (
 // also appended to that file — useful in stdio mode, where the MCP host
 // captures stderr and the operator otherwise cannot see the logs.
 func SetupLogrus(hideTime bool, stdio bool, logFile string) {
-	formatter := &formatter.Formatter{
-		HideKeys:        false,
-		TimestampFormat: "15:04:05", // hour, time, sec only
-		FieldsOrder:     []string{},
+	formatter := &logrus.TextFormatter{
+		FullTimestamp:   true,
+		TimestampFormat: "15:04:05",
 	}
 	if hideTime {
-		formatter.TimestampFormat = "-"
+		formatter.DisableTimestamp = true
 	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stderr.Fd())) { //nolint: gosec
-		// Disable if the output is not terminal.
-		formatter.NoColors = true
+		formatter.DisableColors = true
 	}
 	logrus.SetFormatter(formatter)
 	logrus.SetOutput(io.Discard)

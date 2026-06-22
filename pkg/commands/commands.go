@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/STARRY-S/unistar-mcp/pkg/signal"
+	"github.com/example-org/unistar-mcp/pkg/signal"
 	"github.com/spf13/cobra"
 )
 
@@ -22,12 +22,10 @@ func newBaseCmd(cmd *cobra.Command) *baseCmd {
 }
 
 type baseOpts struct {
-	debug          bool   // Enable debug output
-	lazyLoading    bool   // Expose lazy-loading meta tools instead of full tool schemas
-	logFile        string // Append logs to this file in addition to stderr
-	policyPath     string // Path to a signature verification policy file
-	insecurePolicy bool   // Use an "allow everything" signature verification policy
-	hideLogTime    bool   // Hide log output time (used in validation test)
+	debug       bool   // Enable debug output
+	lazyLoading bool   // Expose lazy-loading meta tools instead of full tool schemas
+	logFile     string // Append logs to this file in addition to stderr
+	hideLogTime bool   // Hide log output time (used in validation test)
 }
 
 var globalOpts = baseOpts{}

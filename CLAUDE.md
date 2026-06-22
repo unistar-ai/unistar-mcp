@@ -51,8 +51,8 @@ effective context. Every design decision follows from that:
   next (e.g. ci_analyze_pr_failures returns run IDs for ci_get_failed_logs /
   ci_rerun_workflow).
 - **Errors must be actionable.** Tool errors go through `runResult.wrap()` (exec.go),
-  which rewrites common failures (missing binary, auth, 404, permission) into guidance
-  the model can act on. Don't return raw stderr.
+  which emits `ERROR: <code> | message | hint: …` for common failures (auth, 404,
+  rate limit, transient 5xx). Don't return raw stderr.
 - **Hard caps on output size.** Log output is error-extracted and byte-capped
   (`errBudget`, `fallbackTail` in ci.go). Any new tool that can produce large output
   needs a similar cap.
@@ -82,9 +82,12 @@ effective context. Every design decision follows from that:
     All external command execution must go through these. Read-only commands
     use `runRetry()`, which retries transient GitHub 5xx/network errors with
     backoff; mutating commands must use `run()` so they never execute twice.
-  - `pr.go` — `pr_list_open`, `pr_get_status`.
-  - `ci.go` — `ci_analyze_pr_failures`, `ci_get_failed_logs`, `ci_rerun_workflow`,
-    plus the log-cleaning/error-extraction helpers.
+  - `pr.go` — PR tools (`pr_list_open`, `pr_get_status`, `pr_list_merged`, …).
+  - `pr_chat_tools.go` — chat-oriented PR tools (`pr_get_overview`, `pr_list_waiting_review`, …).
+  - `ci.go` — CI tools (`ci_analyze_pr_failures`, `ci_get_run_summary`, `ci_get_failed_logs`,
+    `ci_list_runs`, `ci_rerun_workflow`), plus log-cleaning/error-extraction helpers.
+  - `repo.go`, `issue.go`, `security.go` — repo metadata, issues, Dependabot alerts.
+  - `errors.go` — `ERROR:` / `OK:` output contract helpers.
   - `backport.go` — `pr_create_backport`. Works in a throwaway workspace: shallow
     clone (`--depth=1 --branch <target>`) into a temp dir, fetch the merge commit at
     depth 2, cherry-pick, push, open the PR. The workspace is always removed except
@@ -94,6 +97,9 @@ effective context. Every design decision follows from that:
 
 Runtime dependencies: `gh` (authenticated via `gh auth login` or `GH_TOKEN`) and `git`
 on PATH. There are no GitHub API client libraries — everything shells out to `gh`.
+
+Full tool reference: [docs/TOOLS.md](docs/TOOLS.md) (21 business tools + 3 lazy meta-tools).
+Doc drift is guarded by `pkg/server/doc_test.go`.
 
 ## Common commands
 

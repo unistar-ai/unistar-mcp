@@ -1,8 +1,8 @@
 package commands
 
 import (
-	"github.com/STARRY-S/unistar-mcp/pkg/server"
-	"github.com/STARRY-S/unistar-mcp/pkg/utils"
+	"github.com/example-org/unistar-mcp/pkg/server"
+	"github.com/example-org/unistar-mcp/pkg/utils"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -26,8 +27,27 @@ func (s *Server) backportTools() []toolEntry {
 		mcp.WithString("target_branch", mcp.Required(), mcp.Description("The branch to backport onto, e.g. release/1.2")),
 	)
 
+	conflictTool := mcp.NewTool("backport_get_conflict_files",
+		mcp.WithDescription(
+			"List unmerged (conflict) files in a backport workspace left by pr_create_backport. "+
+				"Pass workspace_path from the backport error message. Read-only."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("workspace_path", mcp.Required(), mcp.Description("Temporary workspace path from pr_create_backport conflict error")),
+	)
+
+	suggestTool := mcp.NewTool("backport_suggest_resolution",
+		mcp.WithDescription(
+			"Conflict resolution hints from backport workspace markers (ours vs theirs line counts). "+
+				"Next: resolve in workspace, git add -A && git cherry-pick --continue."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("workspace_path", mcp.Required(), mcp.Description("Temporary workspace path from pr_create_backport conflict error")),
+		mcp.WithNumber("max_files", mcp.Description("Max conflict files to analyze (default 3, max 10)")),
+	)
+
 	return []toolEntry{
 		{tool: backportTool, handler: s.handleBackport},
+		{tool: conflictTool, handler: s.handleBackportConflictFiles},
+		{tool: suggestTool, handler: s.handleBackportSuggestResolution},
 	}
 }
 
@@ -124,7 +144,7 @@ func (s *Server) handleBackport(ctx context.Context, request mcp.CallToolRequest
 				"  1. cd %s\n"+
 				"  2. resolve conflicts, then: git add -A && git cherry-pick --continue\n"+
 				"  3. git push -u origin %s\n"+
-				"  4. gh pr create -R %s --base %s --head %s --title \"[Hackathon][backport -> %s] %s\" --body \"Automated backport of #%d\"\n"+
+				"  4. gh pr create -R %s --base %s --head %s --title \"[backport -> %s] %s\" --body \"Automated backport of #%d\"\n"+
 				"  5. remove the workspace: rm -rf %s\n\n"+
 				"To give up instead: rm -rf %s",
 			short(mergeCommit), targetBranch, branchName, workDir, res.combined(),
@@ -137,7 +157,7 @@ func (s *Server) handleBackport(ctx context.Context, request mcp.CallToolRequest
 		return mcp.NewToolResultError(res.wrap("failed to push backport branch").Error()), nil
 	}
 
-	title := fmt.Sprintf("[Hackathon][backport -> %s] %s", targetBranch, info.Title)
+	title := fmt.Sprintf("[backport -> %s] %s", targetBranch, info.Title)
 	body := backportBody(targetBranch, who, info.Body)
 	res = run(ctx, workDir, "gh", "pr", "create", "-R", repo,
 		"--base", targetBranch, "--head", branchName,
@@ -148,8 +168,155 @@ func (s *Server) handleBackport(ctx context.Context, request mcp.CallToolRequest
 	}
 
 	// gh pr create prints the new PR URL.
-	return mcp.NewToolResultText(fmt.Sprintf(
-		"Backport PR opened: %s", strings.TrimSpace(res.stdout))), nil
+	return mcp.NewToolResultText(formatToolOK(fmt.Sprintf(
+		"Backport PR opened: %s", strings.TrimSpace(res.stdout)))), nil
+}
+
+func (s *Server) handleBackportConflictFiles(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	workDir, err := request.RequireString("workspace_path")
+	if err != nil {
+		return mcp.NewToolResultError(formatToolError(ErrValidation, err.Error(),
+			"pass workspace_path from pr_create_backport error")), nil
+	}
+	workDir = strings.TrimSpace(workDir)
+	if !isBackportWorkspace(workDir) {
+		return mcp.NewToolResultError(formatToolError(ErrValidation,
+			"path is not a unistar backport workspace",
+			"use the exact path from pr_create_backport conflict output")), nil
+	}
+	if _, statErr := os.Stat(workDir); statErr != nil {
+		return mcp.NewToolResultError(formatToolError(ErrNotFound, statErr.Error(),
+			"workspace may have been removed — rerun pr_create_backport")), nil
+	}
+
+	res := run(ctx, workDir, "git", "diff", "--name-only", "--diff-filter=U")
+	if res.err != nil {
+		return mcp.NewToolResultError(res.wrap("failed to list conflict files").Error()), nil
+	}
+	files := strings.Fields(strings.TrimSpace(res.stdout))
+
+	var b strings.Builder
+	if len(files) == 0 {
+		b.WriteString("No unmerged conflict files (cherry-pick may not be in conflict state).\n")
+		b.WriteString("hint: run from the workspace left by pr_create_backport")
+		return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
+	}
+
+	fmt.Fprintf(&b, "%d conflict file(s) in %s:\n", len(files), workDir)
+	for _, f := range files {
+		fmt.Fprintf(&b, "- %s\n", f)
+	}
+
+	if len(files) > 0 {
+		first := files[0]
+		diffRes := run(ctx, workDir, "git", "diff", "--", first)
+		if diffRes.err == nil && strings.TrimSpace(diffRes.stdout) != "" {
+			b.WriteString("\nConflict snippet (first file, capped):\n")
+			b.WriteString(clipForLog(diffRes.stdout, 1500))
+		}
+	}
+	b.WriteString("\nNext: resolve in workspace, git add -A && git cherry-pick --continue")
+	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
+}
+
+func (s *Server) handleBackportSuggestResolution(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	workDir, err := request.RequireString("workspace_path")
+	if err != nil {
+		return mcp.NewToolResultError(formatToolError(ErrValidation, err.Error(),
+			"pass workspace_path from pr_create_backport error")), nil
+	}
+	workDir = strings.TrimSpace(workDir)
+	if !isBackportWorkspace(workDir) {
+		return mcp.NewToolResultError(formatToolError(ErrValidation,
+			"path is not a unistar backport workspace",
+			"use the exact path from pr_create_backport conflict output")), nil
+	}
+	if _, statErr := os.Stat(workDir); statErr != nil {
+		return mcp.NewToolResultError(formatToolError(ErrNotFound, statErr.Error(),
+			"workspace may have been removed — rerun pr_create_backport")), nil
+	}
+
+	maxFiles := int(request.GetFloat("max_files", 3))
+	if maxFiles <= 0 {
+		maxFiles = 3
+	}
+	if maxFiles > 10 {
+		maxFiles = 10
+	}
+
+	res := run(ctx, workDir, "git", "diff", "--name-only", "--diff-filter=U")
+	if res.err != nil {
+		return mcp.NewToolResultError(res.wrap("failed to list conflict files").Error()), nil
+	}
+	files := strings.Fields(strings.TrimSpace(res.stdout))
+	if len(files) == 0 {
+		return mcp.NewToolResultText(
+			"No unmerged conflict files — cherry-pick may not be in conflict state.\nNext: backport_get_conflict_files to verify."), nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Resolution hints for %d conflict file(s) in %s:\n", len(files), workDir)
+	analyze := files
+	if len(analyze) > maxFiles {
+		analyze = analyze[:maxFiles]
+	}
+	for _, f := range analyze {
+		content, readErr := os.ReadFile(filepath.Join(workDir, f))
+		if readErr != nil {
+			fmt.Fprintf(&b, "\n%s: (could not read file)\n", f)
+			continue
+		}
+		ours, theirs, hint := analyzeConflictMarkers(string(content))
+		fmt.Fprintf(&b, "\n%s:\n  ours:%d lines  theirs:%d lines\n  hint: %s\n", f, ours, theirs, hint)
+	}
+	if len(files) > len(analyze) {
+		fmt.Fprintf(&b, "\n(%d more file(s) — raise max_files or use backport_get_conflict_files)\n", len(files)-len(analyze))
+	}
+	b.WriteString("\nNext: resolve markers, git add -A && git cherry-pick --continue")
+	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
+}
+
+func analyzeConflictMarkers(content string) (ours, theirs int, hint string) {
+	inOurs := false
+	inTheirs := false
+	for _, line := range strings.Split(content, "\n") {
+		trim := strings.TrimSpace(line)
+		if strings.HasPrefix(trim, "<<<<<<<") {
+			inOurs = true
+			inTheirs = false
+			continue
+		}
+		if trim == "=======" {
+			inOurs = false
+			inTheirs = true
+			continue
+		}
+		if strings.HasPrefix(trim, ">>>>>>>") {
+			inTheirs = false
+			continue
+		}
+		if inOurs {
+			ours++
+		} else if inTheirs {
+			theirs++
+		}
+	}
+	switch {
+	case ours == 0 && theirs > 0:
+		hint = "only target-branch content — consider accepting incoming (theirs)"
+	case theirs == 0 && ours > 0:
+		hint = "only cherry-pick content — consider keeping ours"
+	case ours > 0 && theirs > 0:
+		hint = "both sides edited — manual merge; compare semantics before choosing"
+	default:
+		hint = "markers present but no distinct hunks — inspect file manually"
+	}
+	return ours, theirs, hint
+}
+
+func isBackportWorkspace(path string) bool {
+	base := filepath.Base(filepath.Clean(path))
+	return strings.HasPrefix(base, "unistar-backport-")
 }
 
 // ghCurrentUser returns the login of the authenticated GitHub user, or

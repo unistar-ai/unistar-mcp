@@ -21,8 +21,13 @@
 go.work
 go.work.sum
 
-# env file
+# env / secrets — never commit tokens or webhook secrets
 .env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
 
 # vscode
 .vscode/
@@ -34,7 +39,7 @@ build/
 /*tmp*
 *.log
 /*-mcp
-
+unistar-mcp
 
 # claude config: share project settings/skills and the MCP registration,
 # but keep personal/local config (per-user allow lists, MCP approvals) out.

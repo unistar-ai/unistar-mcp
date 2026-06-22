@@ -29,6 +29,8 @@ type checkRollup struct {
 	Status     string `json:"status"`     // CheckRun: QUEUED | IN_PROGRESS | COMPLETED
 	Conclusion string `json:"conclusion"` // CheckRun: SUCCESS | FAILURE | ...
 	State      string `json:"state"`      // StatusContext: SUCCESS | FAILURE | PENDING | ERROR
+	DetailsURL string `json:"detailsUrl"` // CheckRun
+	TargetURL  string `json:"targetUrl"`  // StatusContext
 }
 
 // pullRequest mirrors the fields we request from `gh pr list/view --json`.
@@ -51,7 +53,7 @@ func (s *Server) prTools() []toolEntry {
 				"own PRs or a GitHub login to filter by user. Output is bounded by limit, so this is "+
 				"safe on large repositories."),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form, e.g. STARRY-S/unistar-mcp")),
+		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form, e.g. acme/widget")),
 		mcp.WithString("author", mcp.Description("Filter by author: \"@me\" for your own PRs, or a GitHub login. Omit to list all authors.")),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of PRs to return, newest first (default 20)")),
 	)
@@ -85,10 +87,12 @@ func (s *Server) prTools() []toolEntry {
 
 	mergedTool := mcp.NewTool("pr_list_merged",
 		mcp.WithDescription(
-			"List recently merged pull requests since a date (release notes / regression link)."),
+			"List recently merged pull requests since a date (release notes / regression link / backport label scan). "+
+				"Optional label filters to PRs carrying that label."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("repo", mcp.Required(), mcp.Description("The repository in owner/repo form")),
 		mcp.WithString("since", mcp.Description("ISO date YYYY-MM-DD or days ago as number string (default 14)")),
+		mcp.WithString("label", mcp.Description("Optional label name filter (e.g. backport/release)")),
 		mcp.WithNumber("limit", mcp.Description("Maximum merged PRs to return (default 30)")),
 	)
 
@@ -123,6 +127,9 @@ func (s *Server) prTools() []toolEntry {
 func (s *Server) allPRTools() []toolEntry {
 	tools := s.prTools()
 	tools = append(tools, s.prChatTools()...)
+	tools = append(tools, s.prCISnapshotTools()...)
+	tools = append(tools, s.prBatchTools()...)
+	tools = append(tools, s.prTier2Tools()...)
 	return tools
 }
 
@@ -171,13 +178,8 @@ func (s *Server) handleListPRs(ctx context.Context, request mcp.CallToolRequest)
 		fmt.Fprintf(&b, "(list may be truncated at limit=%d; pass a larger limit to see more)\n", limit)
 	}
 	for _, pr := range prs {
-		draft := ""
-		if pr.IsDraft {
-			draft = " [draft]"
-		}
-		fmt.Fprintf(&b, "#%d  %s  @%s  CI:%s  review:%s%s\n",
-			pr.Number, pr.Title, pr.Author.Login,
-			ciState(pr.StatusCheck), reviewState(pr.ReviewDecision), draft)
+		b.WriteString(formatPRListLine(pr))
+		b.WriteByte('\n')
 	}
 
 	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
@@ -215,6 +217,9 @@ func (s *Server) handlePRStatus(ctx context.Context, request mcp.CallToolRequest
 	}
 	b.WriteByte('\n')
 	fmt.Fprintf(&b, "CI: %d passing / %d failing / %d pending\n", pass, fail, pending)
+	if ext := formatExternalCheckSummary(pr.StatusCheck); ext != "" {
+		b.WriteString(ext)
+	}
 	fmt.Fprintf(&b, "Review: %s\n", reviewState(pr.ReviewDecision))
 	fmt.Fprintf(&b, "Mergeable: %s", mergeableState(pr.Mergeable, fail, pending))
 
@@ -366,43 +371,17 @@ func (s *Server) handleListMergedPRs(ctx context.Context, request mcp.CallToolRe
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	sinceRaw := request.GetString("since", "")
-	sinceDate, err := mergedSinceDate(sinceRaw)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
 	limit := int(request.GetFloat("limit", 30))
 	if limit <= 0 {
 		limit = 30
 	}
+	label := strings.TrimSpace(request.GetString("label", ""))
 
-	search := fmt.Sprintf("merged:>=%s", sinceDate)
-	res := runRetry(ctx, "", "gh", "pr", "list", "-R", repo, "--state", "merged",
-		"--limit", fmt.Sprintf("%d", limit),
-		"--search", search,
-		"--json", "number,title,author,mergedAt")
-	if res.err != nil {
-		return mcp.NewToolResultError(res.wrap("failed to list merged PRs").Error()), nil
+	text, err := formatMergedPRList(ctx, repo, sinceRaw, label, limit)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
-
-	var prs []prMergedRow
-	if err := json.Unmarshal([]byte(res.stdout), &prs); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to parse merged PR list: %s", err)), nil
-	}
-	if len(prs) == 0 {
-		return mcp.NewToolResultText(fmt.Sprintf("No merged PRs in %s since %s.", repo, sinceDate)), nil
-	}
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "%d merged PR(s) in %s since %s:\n", len(prs), repo, sinceDate)
-	for _, pr := range prs {
-		merged := pr.MergedAt
-		if len(merged) >= 10 {
-			merged = merged[:10]
-		}
-		fmt.Fprintf(&b, "#%d  %s  @%s  merged:%s\n",
-			pr.Number, pr.Title, pr.Author.Login, merged)
-	}
-	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
+	return mcp.NewToolResultText(text), nil
 }
 
 func (s *Server) handlePRDiff(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -458,11 +437,11 @@ func (s *Server) handlePostPRComment(ctx context.Context, request mcp.CallToolRe
 	}
 	prNum := int(prNumFloat)
 
-	res := runRetry(ctx, "", "gh", "pr", "comment", fmt.Sprintf("%d", prNum), "-R", repo, "--body", body)
+	res := run(ctx, "", "gh", "pr", "comment", fmt.Sprintf("%d", prNum), "-R", repo, "--body", body)
 	if res.err != nil {
 		return mcp.NewToolResultError(res.wrap("failed to post PR comment").Error()), nil
 	}
-	return mcp.NewToolResultText(fmt.Sprintf("Comment posted on %s#%d.", repo, prNum)), nil
+	return mcp.NewToolResultText(formatToolOK(fmt.Sprintf("Comment posted on %s#%d.", repo, prNum))), nil
 }
 
 // tallyChecks counts passing, failing, and pending checks in a rollup.
@@ -520,6 +499,28 @@ func reviewState(decision string) string {
 	default:
 		return "none"
 	}
+}
+
+// formatExternalCheckSummary lists non-GitHub-Actions checks (StatusContext)
+// from the rollup so agents know when to inspect the PR page instead of
+// calling ci_get_failed_logs.
+func formatExternalCheckSummary(checks []checkRollup) string {
+	var lines []string
+	for _, c := range checks {
+		if c.Typename != "StatusContext" {
+			continue
+		}
+		name := checkDisplayName(c)
+		if name == "" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("  - %s: %s", name, strings.ToLower(checkVerdict(c))))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "External checks (not GitHub Actions — inspect PR page, do not call ci_get_failed_logs):\n" +
+		strings.Join(lines, "\n") + "\n"
 }
 
 // mergeableState combines gh's mergeable flag with the CI tally into a verdict.

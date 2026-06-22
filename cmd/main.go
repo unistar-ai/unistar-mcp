@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/STARRY-S/unistar-mcp/pkg/commands"
+	"github.com/example-org/unistar-mcp/pkg/commands"
 	"github.com/sirupsen/logrus"
 )
 

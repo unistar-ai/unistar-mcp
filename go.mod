@@ -1,9 +1,8 @@
-module github.com/STARRY-S/unistar-mcp
+module github.com/example-org/unistar-mcp
 
 go 1.26.4
 
 require (
-	github.com/STARRY-S/simple-logrus-formatter v0.0.0-20250427025245-bdb535b56165
 	github.com/mark3labs/mcp-go v0.54.1
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2

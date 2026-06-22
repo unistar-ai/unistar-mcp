@@ -45,11 +45,11 @@ func TestRateLimitNotRetriedAndClassified(t *testing.T) {
 		t.Error("rate limit misclassified as transient")
 	}
 	msg := r.wrap("failed to list pull requests").Error()
-	if !strings.Contains(msg, "rate limit") || !strings.Contains(msg, "wait") {
-		t.Errorf("rate limit should produce wait guidance:\n%s", msg)
+	if !strings.Contains(msg, "ERROR: RATE_LIMIT") || !strings.Contains(msg, "wait") {
+		t.Errorf("rate limit should produce ERROR: RATE_LIMIT with wait guidance:\n%s", msg)
 	}
-	if strings.Contains(msg, "permission denied") {
-		t.Errorf("rate limit misclassified as permission denied:\n%s", msg)
+	if strings.Contains(msg, "ERROR: FORBIDDEN") {
+		t.Errorf("rate limit misclassified as FORBIDDEN:\n%s", msg)
 	}
 }
 
@@ -60,8 +60,8 @@ func TestWrapClassifiesServerErrors(t *testing.T) {
 		err:      errors.New("exit status 1"),
 	}
 	msg := r.wrap("failed to fetch failed logs").Error()
-	if !strings.Contains(msg, "retry") {
-		t.Errorf("5xx error should tell the agent to retry:\n%s", msg)
+	if !strings.Contains(msg, "ERROR: TRANSIENT") || !strings.Contains(msg, "Retry") {
+		t.Errorf("5xx error should produce ERROR: TRANSIENT with retry hint:\n%s", msg)
 	}
 }
 

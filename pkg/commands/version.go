@@ -3,7 +3,7 @@ package commands
 import (
 	"fmt"
 
-	"github.com/STARRY-S/unistar-mcp/pkg/utils"
+	"github.com/example-org/unistar-mcp/pkg/utils"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )

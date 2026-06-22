@@ -23,8 +23,8 @@ builds:
   ldflags:
     - -extldflags -static
     - -s -w
-    - -X github.com/STARRY-S/unistar-mcp/pkg/utils.GitCommit={{.Env.COMMIT}}
-    - -X github.com/STARRY-S/unistar-mcp/pkg/utils.Version={{.Env.TAG}}
+    - -X github.com/example-org/unistar-mcp/pkg/utils.GitCommit={{.Env.COMMIT}}
+    - -X github.com/example-org/unistar-mcp/pkg/utils.Version={{.Env.TAG}}
   main: ./cmd/main.go
   id: unistar-mcp
   binary: unistar-mcp

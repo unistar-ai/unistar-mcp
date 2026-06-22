@@ -44,6 +44,7 @@ func TestToolListContainsAllTools(t *testing.T) {
 		"pr_create_backport",
 		"issue_list_open", "issue_get", "issue_add_label",
 		"alert_list_open",
+		"repo_get_info",
 	} {
 		if !strings.Contains(out, name) {
 			t.Errorf("tool_list output missing %q:\n%s", name, out)
@@ -116,5 +117,36 @@ func TestToolCallRejectsStringArgs(t *testing.T) {
 	out := resultText(t, res)
 	if !strings.Contains(out, "JSON object") {
 		t.Errorf("string args should be rejected with guidance:\n%s", out)
+	}
+}
+
+func TestToolSearchFindsCISnapshot(t *testing.T) {
+	s := New(Options{LazyLoading: true})
+
+	res, err := s.handleToolSearch(context.Background(),
+		callReq(map[string]any{"query": "pr ci snapshot", "limit": 3}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := resultText(t, res)
+	if !strings.Contains(out, "pr_get_ci_snapshot") {
+		t.Errorf("search should rank pr_get_ci_snapshot:\n%s", out)
+	}
+}
+
+func TestToolListCategoryCI(t *testing.T) {
+	s := New(Options{LazyLoading: true})
+
+	res, err := s.handleToolListCategory(context.Background(),
+		callReq(map[string]any{"category": "CI"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := resultText(t, res)
+	if !strings.Contains(out, "ci_get_failure_digest") {
+		t.Errorf("CI category should include ci_get_failure_digest:\n%s", out)
+	}
+	if strings.Contains(out, "pr_get_overview") {
+		t.Errorf("CI category should not include PR tools:\n%s", out)
 	}
 }

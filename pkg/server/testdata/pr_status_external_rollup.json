@@ -1,0 +1,22 @@
+{
+  "number": 42,
+  "title": "feat: widget",
+  "statusCheckRollup": [
+    {
+      "__typename": "CheckRun",
+      "name": "CI",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS"
+    },
+    {
+      "__typename": "StatusContext",
+      "context": "ci/jenkins",
+      "state": "FAILURE"
+    },
+    {
+      "__typename": "StatusContext",
+      "context": "codecov/patch",
+      "state": "PENDING"
+    }
+  ]
+}

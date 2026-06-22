@@ -56,10 +56,21 @@ func (s *Server) issueTools() []toolEntry {
 		mcp.WithString("label", mcp.Required(), mcp.Description("Label name to add")),
 	)
 
+	searchTool := mcp.NewTool("issue_search",
+		mcp.WithDescription(
+			"Search GitHub issues with compact results (issue-triage). "+
+				"Use GitHub search syntax in query. Next: issue_get for details."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("repo", mcp.Required(), mcp.Description("Repository in owner/repo form")),
+		mcp.WithString("query", mcp.Required(), mcp.Description("Search terms (GitHub issue search syntax)")),
+		mcp.WithNumber("limit", mcp.Description("Max results (default 20, max 50)")),
+	)
+
 	return []toolEntry{
 		{tool: listTool, handler: s.handleIssueListOpen},
 		{tool: getTool, handler: s.handleIssueGet},
 		{tool: labelTool, handler: s.handleIssueAddLabel},
+		{tool: searchTool, handler: s.handleIssueSearch},
 	}
 }
 
@@ -163,8 +174,57 @@ func (s *Server) handleIssueAddLabel(ctx context.Context, request mcp.CallToolRe
 	if res.err != nil {
 		return mcp.NewToolResultError(res.wrap("failed to add label").Error()), nil
 	}
-	return mcp.NewToolResultText(fmt.Sprintf("Added label %q to issue #%d in %s.",
-		label, int(numFloat), repo)), nil
+	return mcp.NewToolResultText(formatToolOK(fmt.Sprintf("Added label %q to issue #%d in %s.",
+		label, int(numFloat), repo))), nil
+}
+
+func (s *Server) handleIssueSearch(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	repo, err := request.RequireString("repo")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	query, err := request.RequireString("query")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return mcp.NewToolResultError(formatToolError(ErrValidation, "query is empty",
+			"pass GitHub issue search terms")), nil
+	}
+	limit := int(request.GetFloat("limit", defaultIssueListLimit))
+	if limit <= 0 {
+		limit = defaultIssueListLimit
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	res := runRetry(ctx, "", "gh", "search", "issues", query,
+		"--repo", repo,
+		"--limit", fmt.Sprintf("%d", limit),
+		"--json", "number,title,author,state,labels")
+	if res.err != nil {
+		return mcp.NewToolResultError(res.wrap("failed to search issues").Error()), nil
+	}
+
+	var issues []issueItem
+	if err := json.Unmarshal([]byte(res.stdout), &issues); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to parse issue search: %s", err)), nil
+	}
+	if len(issues) == 0 {
+		return mcp.NewToolResultText(fmt.Sprintf("No issues matching %q in %s.", query, repo)), nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d issue(s) matching %q in %s:\n", len(issues), query, repo)
+	for _, iss := range issues {
+		labels := formatIssueLabels(iss.Labels)
+		fmt.Fprintf(&b, "#%d  %s  @%s  %s  labels:%s\n",
+			iss.Number, iss.Title, iss.Author.Login, strings.ToLower(iss.State), labels)
+	}
+	b.WriteString("Next: issue_get for full body on a specific number.")
+	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
 }
 
 func formatIssueLabels(labels []issueLabel) string {

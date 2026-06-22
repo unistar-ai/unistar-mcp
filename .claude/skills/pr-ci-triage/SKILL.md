@@ -1,6 +1,6 @@
 ---
 name: pr-ci-triage
-description: Inspect and act on GitHub pull requests and their CI using the unistar-mcp tools. Use this whenever asked to check a PR's status, find out why CI is failing, decide whether a failure is flaky or a real bug, rerun failed CI jobs, or backport a merged PR. Always prefer these MCP tools over shelling out to gh or git directly.
+description: Inspect and act on GitHub pull requests and their CI using the unistar-mcp tools. Use this whenever asked to check a PR's status, find out why CI is failing, decide whether a failure is flaky or a real bug, rerun failed CI jobs, investigate main branch regressions, or backport a merged PR. Always prefer these MCP tools over shelling out to gh or git directly.
 ---
 
 # PR & CI triage with unistar-mcp
@@ -8,52 +8,74 @@ description: Inspect and act on GitHub pull requests and their CI using the unis
 The `unistar-mcp` server wraps `gh`/`git` and returns compact, capped summaries
 built for exactly this workflow. Prefer these tools over running `gh`/`git`
 yourself: they request only the fields that matter, cap log output, and turn
-common failures into actionable guidance. Raw `gh pr` / `gh run` calls are
-intentionally blocked in this project.
+common failures into actionable guidance.
 
-## The tools
+Errors use `ERROR: <code> | message | hint: …` (codes like `NOT_FOUND`, `TRANSIENT`, `RATE_LIMIT`).
+
+See [docs/TOOLS.md](../../docs/TOOLS.md) for all **51** business tools (+ 3 lazy meta-tools).
+
+## Core tools (CI triage)
 
 | Tool | Purpose | Required args |
 |------|---------|---------------|
-| `pr_list_open` | One author's open PRs, with a one-line CI/review summary each | `repo` |
-| `pr_get_status` | A single PR's CI tally, review decision, mergeability | `repo`, `pr_number` |
-| `ci_analyze_pr_failures` | Failing CI runs for a PR, with run IDs | `repo`, `pr_number` |
-| `ci_get_failed_logs` | Extracted error lines from a failed run | `repo`, `run_id` |
-| `ci_rerun_workflow` | Rerun the failed jobs of a run (mutating) | `repo`, `run_id` |
-| `pr_create_backport` | Cherry-pick a merged PR onto a branch, open the backport PR (mutating) | `repo`, `pr_number`, `target_branch` |
+| `pr_get_overview` | Single-call snapshot: status, files, failing run IDs | `repo`, `pr_number` |
+| `pr_get_status` | CI tally, external checks, review, mergeability | `repo`, `pr_number` |
+| `pr_get_overview_batch` | Light multi-PR overview (max 5, GraphQL; no run IDs) | `repo`, `pr_numbers` |
+| `pr_get_status_batch` | Batch CI/review lines (max 15, GraphQL) | `repo`, `pr_numbers` |
+| `ci_analyze_pr_failures` | Failing Actions runs + external/pending checks | `repo`, `pr_number` |
+| `ci_get_run_summary` | Run status, failed jobs/steps (`job_id` for per-job logs) | `repo`, `run_id` |
+| `ci_get_failure_digest` | Verdict + FP + ~1KB excerpt (lightest) | `repo`, `run_id` |
+| `ci_get_failed_logs` | Synopsis + distilled errors; optional `job_id`, `focus` | `repo`, `run_id` |
+| `ci_get_job_logs` | Distilled logs for one job (when full run logs are huge) | `repo`, `run_id`, `job_id` |
+| `ci_failure_fingerprint` | Job/step/test/error signature + flaky ledger hash | `repo`, `run_id` |
+| `policy_classify_failure` | Rule verdict: test / infra / auth / timeout / external_ci | `repo`, `run_id` |
+| `ci_compare_runs` | Same fingerprint across two runs (after rerun) | `repo`, `run_id_a`, `run_id_b` |
+| `ci_list_runs` | Recent runs on a branch | `repo` |
+| `ci_branch_health` | Failure rate, streak, last failure (aggregates runs) | `repo` |
+| `ci_correlate_prs` | Merged PRs before a failing main run (regression-link) | `repo`, `run_id` |
+| `ci_list_workflows` | Workflow names/IDs (when guessing workflow names) | `repo` |
+| `ci_list_external_checks` | External CI only (Jenkins, etc.) | `repo`, `pr_number` |
+| `ci_rerun_workflow` | Rerun failed jobs (mutating) | `repo`, `run_id` |
+| `pr_create_backport` | Cherry-pick merged PR (mutating) | `repo`, `pr_number`, `target_branch` |
+| `backport_get_conflict_files` | Conflict paths after backport failure | `workspace_path` |
 
-`repo` is always `owner/repo` (e.g. `acme/widget`). `pr_list_open` lists all
-authors by default, newest first, bounded by `limit` (default 20); pass
-`author="@me"` for your own PRs or a GitHub login to filter by user.
+`repo` is always `owner/repo`.
 
 ## Workflow: "why is this PR's CI failing?"
 
-Chain the tools, do not jump straight to logs:
+Chain the tools; do not jump straight to full logs:
 
-1. **`pr_get_status`** — confirm it is actually failing and see the pass/fail/pending tally. If nothing is failing, stop here.
-2. **`ci_analyze_pr_failures`** — get the failing run IDs and their conclusions. This is the entry point that hands you the IDs the next two tools need.
-3. **`ci_get_failed_logs`** (per failing run ID) — read the extracted error lines and judge **flaky vs real**:
-   - real bug → summarize the failing step and the error; do not rerun.
-   - flaky (network blip, timeout, known-flaky test) → go to step 4.
-4. **`ci_rerun_workflow`** — only for flaky failures, and only after looking at the logs. This is mutating; say what you are rerunning and why.
+1. **`pr_get_overview`** or **`pr_get_status`** — confirm failing/pending checks. Note **External checks** lines (Jenkins, etc.).
+2. **`ci_analyze_pr_failures`** — failing GitHub Actions run IDs. Output separates:
+   - real failures → continue triage
+   - `action_required` → approval gate; **no logs**; tell user to approve on GitHub
+   - external checks → PR checks tab; **do not** call `ci_get_failed_logs`
+3. **`ci_get_run_summary`** (per run ID) — failed jobs/steps; note `job_id` values.
+4. **`ci_get_failure_digest`** or **`ci_failure_fingerprint`** → **`policy_classify_failure`** — classify before heavy logs.
+5. Logs (if needed):
+   - **`ci_get_failed_logs`** — pass `job_id` on matrix workflows; `focus=step:<name>` or `focus=all`; page with `max_lines`
+   - **`ci_get_job_logs`** — deeper single-job logs
+6. Decision:
+   - real bug → summarize; do not rerun
+   - flaky / infra timeout → **`ci_rerun_workflow`** (mutating; explain why)
+7. After rerun → **`ci_compare_runs`** (old vs new run ID) to see if fingerprint changed.
 
-Two things the model gets wrong without help:
+Optional: match fingerprint against coworker **`store_list_flaky`** (local ledger).
 
-- A run with conclusion **`action_required`** is waiting for approval, not a code
-  failure — it has no failure logs to analyze. Tell the user it needs approval.
-- `ci_analyze_pr_failures` only sees GitHub Actions. If `pr_get_status` reports
-  failing checks but analyze finds none, the failures come from an **external CI**
-  (commit statuses) — point the user at the PR page rather than insisting nothing failed.
+## Workflow: "main CI is red — what broke?"
 
-## Workflow: backport a merged PR
+1. **`ci_list_runs`** or **`ci_branch_health`** on `main` (or default branch).
+2. Pick the failing **`run_id`**.
+3. **`ci_correlate_prs`** — recently merged PRs before the failure.
+4. Continue with run summary → digest → logs as above.
 
-1. Make sure the PR is **merged** (an unmerged PR has no merge commit to cherry-pick).
-2. **`pr_create_backport`** with the `target_branch` (e.g. `release/3.4`, `next/1.2.0`, or any branch). It clones into a throwaway workspace, cherry-picks, pushes, and opens the PR — you do not need a local clone.
-3. On a **cherry-pick conflict** the tool returns step-by-step manual instructions and keeps the temporary workspace. Relay those instructions; do not try to resolve the conflict by shelling out to git.
+## External CI
 
-## If the server is running in `--lazy` mode
+If **`ci_analyze_pr_failures`** or **`pr_get_status`** lists external checks (Jenkins, Codecov, etc.):
+- Do **not** call `ci_get_failed_logs` or `ci_get_job_logs`.
+- Use **`ci_list_external_checks`** / **`ci_get_check_url`** and inspect the external system.
 
-Only three meta tools are visible: `tool_list`, `tool_describe`, `tool_call`.
-Map the workflow onto them: `tool_list` to see names, `tool_describe` for a
-tool's schema, then `tool_call` with `{ "name": "...", "args": { ... } }` where
-`args` is a real JSON object (not a string). For a demo, full mode is clearer.
+## Mutating tools
+
+- **`ci_rerun_workflow`**, **`pr_create_backport`**, **`pr_post_comment`** require explicit user approval in coworker.
+- Never rerun when the failure is a clear code/test bug.

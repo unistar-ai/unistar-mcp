@@ -1,10 +1,44 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 )
+
+func TestComputeCIKind(t *testing.T) {
+	var pr struct {
+		StatusCheck []checkRollup `json:"statusCheckRollup"`
+	}
+	if err := json.Unmarshal(loadFixture(t, "pr_status_external_rollup.json"), &pr); err != nil {
+		t.Fatal(err)
+	}
+	rollup := pr.StatusCheck
+
+	if got := computeCIKind(1, 0, rollup); got != "mixed" {
+		t.Fatalf("actions+external = %q, want mixed", got)
+	}
+	if got := computeCIKind(0, 0, rollup); got != "external_only" {
+		t.Fatalf("external only = %q, want external_only", got)
+	}
+	if got := computeCIKind(2, 0, nil); got != "actions_only" {
+		t.Fatalf("actions only = %q, want actions_only", got)
+	}
+	if got := computeCIKind(0, 1, nil); got != "approval" {
+		t.Fatalf("approval = %q, want approval", got)
+	}
+	if got := computeCIKind(0, 0, nil); got != "clean" {
+		t.Fatalf("clean = %q, want clean", got)
+	}
+}
+
+func TestPrependCIKind(t *testing.T) {
+	out := prependCIKind("2 failing run(s)", "actions_only")
+	if !strings.HasPrefix(out, "CI_KIND: actions_only\n") {
+		t.Fatalf("unexpected prefix: %q", out)
+	}
+}
 
 func TestPaginateLines(t *testing.T) {
 	text := "a\nb\nc\nd\ne"
@@ -23,6 +57,15 @@ func TestPaginateLines(t *testing.T) {
 	_, total, next, hasMore = paginateLines(text, 5, 2)
 	if total != 5 || next != 5 || hasMore {
 		t.Fatalf("past end: total=%d next=%d hasMore=%v", total, next, hasMore)
+	}
+}
+
+func TestFormatRunDuration(t *testing.T) {
+	if got := formatRunDuration("2024-01-01T10:00:00Z", "2024-01-01T10:04:12Z", "success"); got != "4m12s" {
+		t.Fatalf("duration = %q, want 4m12s", got)
+	}
+	if got := formatRunDuration("", "", "in_progress"); got != "-" {
+		t.Fatalf("in_progress duration = %q, want -", got)
 	}
 }
 
@@ -120,27 +163,43 @@ func TestCleanGHLog_stripsRawAPITimestampPrefix(t *testing.T) {
 	}
 }
 
-func TestGhRunLogUnavailableYet(t *testing.T) {
+func TestGhRunLogRecoverable(t *testing.T) {
 	inProgress := runResult{
 		err:    fmt.Errorf("exit 1"),
 		stderr: "run 27672089136 is still in progress; log will be available when it is complete",
 	}
-	if !ghRunLogUnavailableYet(inProgress) {
+	if !ghRunLogRecoverable(inProgress) {
 		t.Fatal("expected in-progress gh error to be recoverable")
 	}
+	skippedJob := runResult{
+		err:    fmt.Errorf("exit 1"),
+		stderr: "log not found: 45636838855",
+	}
+	if !ghRunLogRecoverable(skippedJob) {
+		t.Fatal("expected log-not-found to be recoverable")
+	}
 	empty := runResult{stdout: "  \n"}
-	if !ghRunLogUnavailableYet(empty) {
+	if !ghRunLogRecoverable(empty) {
 		t.Fatal("expected empty stdout to trigger fallback")
 	}
 	ok := runResult{stdout: "error line\n"}
-	if ghRunLogUnavailableYet(ok) {
-		t.Fatal("non-empty stdout should not trigger fallback")
+	if ghRunLogRecoverable(ok) {
+		t.Fatal("non-empty stdout with no error should not be recoverable")
 	}
 	auth := runResult{
 		err:    fmt.Errorf("exit 1"),
 		stderr: "HTTP 401: Bad credentials",
 	}
-	if ghRunLogUnavailableYet(auth) {
-		t.Fatal("auth errors must not be treated as in-progress")
+	if ghRunLogRecoverable(auth) {
+		t.Fatal("auth errors must not be treated as recoverable")
+	}
+}
+
+func TestJobConclusionSkipped(t *testing.T) {
+	if !jobConclusionSkipped(runJob{Conclusion: "skipped"}) {
+		t.Fatal("expected skipped")
+	}
+	if jobConclusionSkipped(runJob{Conclusion: "failure"}) {
+		t.Fatal("failure is not skipped")
 	}
 }

@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/go/pkg/mod/ \
     CGO_ENABLED=0 \
     go build \
         -buildmode=pie \
-        -ldflags="-extldflags='-static' -s -w -X github.com/STARRY-S/unistar-mcp/pkg/utils.Version=${TAG} -X github.com/STARRY-S/unistar-mcp/pkg/utils.GitCommit=${COMMIT}" \
+        -ldflags="-extldflags='-static' -s -w -X github.com/example-org/unistar-mcp/pkg/utils.Version=${TAG} -X github.com/example-org/unistar-mcp/pkg/utils.GitCommit=${COMMIT}" \
         -o /unistar-mcp \
         ./cmd/
 

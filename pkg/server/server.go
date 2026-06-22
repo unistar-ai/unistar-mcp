@@ -24,12 +24,20 @@ type Options struct {
 	// tools instead of advertising every tool schema in tools/list, keeping
 	// the schema payload constant as the tool count grows.
 	LazyLoading bool
+
+	// WebhookPath is the GitHub webhook ingest path in HTTP mode (default /hooks/github).
+	WebhookPath string
+
+	// EventCapacity is the in-memory ring buffer size for webhook events (default 200).
+	EventCapacity int
 }
 
 type Server struct {
 	mcpServer *server.MCPServer
 	opts      Options
 	tools     []toolEntry
+	events    *eventStore
+	cache     *toolCache
 }
 
 func New(opts Options) *Server {
@@ -38,15 +46,19 @@ func New(opts Options) *Server {
 		"0.0.1",
 		server.WithLogging(),
 		server.WithToolCapabilities(true),
+		server.WithResourceCapabilities(true, false),
 		server.WithRecovery(),
 	)
 
 	srv := &Server{
 		mcpServer: s,
 		opts:      opts,
+		events:    newEventStore(opts.EventCapacity),
+		cache:     newToolCache(),
 	}
 
 	srv.registerTools()
+	srv.registerResources()
 
 	return srv
 }
@@ -101,11 +113,13 @@ func (s *Server) StartHTTP(ctx context.Context) error {
 	)
 	mux := http.NewServeMux()
 	mux.Handle(mcpEndpointPath, mcpHTTP)
+	webhookPath := s.webhookPath()
+	mux.Handle(webhookPath, http.HandlerFunc(s.handleGitHubWebhook))
 	httpServer.Handler = mux
 
 	errCh := make(chan error, 1)
 	go func() {
-		logrus.Infof("Starting MCP Server over Streamable HTTP on %s (endpoint: %s)", addr, mcpEndpointPath)
+		logrus.Infof("Starting MCP Server over Streamable HTTP on %s (endpoint: %s, webhook: %s)", addr, mcpEndpointPath, webhookPath)
 		errCh <- mcpHTTP.Start(addr)
 	}()
 
@@ -123,10 +137,26 @@ func (s *Server) StartHTTP(ctx context.Context) error {
 
 func (s *Server) registerTools() {
 	s.tools = append(s.tools, s.ciTools()...)
+	s.tools = append(s.tools, s.ciDigestTools()...)
+	s.tools = append(s.tools, s.fingerprintTools()...)
 	s.tools = append(s.tools, s.allPRTools()...)
+	s.tools = append(s.tools, s.repoTools()...)
 	s.tools = append(s.tools, s.backportTools()...)
 	s.tools = append(s.tools, s.issueTools()...)
 	s.tools = append(s.tools, s.securityTools()...)
+	s.tools = append(s.tools, s.notifyTools()...)
+	s.tools = append(s.tools, s.eventTools()...)
+	s.tools = append(s.tools, s.policyTools()...)
+	s.tools = append(s.tools, s.ciHealthTools()...)
+	s.tools = append(s.tools, s.ciWorkflowStatsTools()...)
+	s.tools = append(s.tools, s.ciTier2Tools()...)
+	s.tools = append(s.tools, s.prReviewRiskTools()...)
+	s.tools = append(s.tools, s.prMergeQueueTools()...)
+	s.tools = append(s.tools, s.prDraftCommentTools()...)
+	s.tools = append(s.tools, s.prHygieneTools()...)
+	s.tools = append(s.tools, s.prReviewRoutingTools()...)
+	s.tools = append(s.tools, s.ciCheckURLTools()...)
+	s.tools = append(s.tools, s.releaseTools()...)
 
 	if s.opts.LazyLoading {
 		logrus.Info("Lazy loading enabled: exposing tool_list/tool_describe/tool_call meta tools")

@@ -31,19 +31,122 @@ every design choice below follows from that one constraint.
 
 ## Tools
 
+All tools take `repo` as `owner/repo` unless noted. Errors use `ERROR: <code> | message | hint: …` so agents can parse them. Success responses may prefix `OK:` for mutating tools.
+
+### Pull requests
+
 | Tool | Description |
 |------|-------------|
-| `pr_list_open` | List open PRs (all authors by default, newest first; `author="@me"` for yours), one compact CI/review line each. |
-| `pr_get_status` | Compact mergeability snapshot for one PR: CI tally, review decision, draft state, mergeable. |
-| `ci_analyze_pr_failures` | List the failing CI workflow runs for a PR, with their `run_id`s. |
-| `ci_get_failed_logs` | Fetch the cleaned failed-step logs of a run for analysis. |
-| `ci_rerun_workflow` | Rerun the failed jobs of a run. |
-| `pr_create_backport` | Cherry-pick a merged PR onto a target branch and open a backport PR. |
+| `pr_list_open` | Open PRs with compact CI/review line each (`author`, `limit`). |
+| `pr_list_stale` | Open PRs with no update for N days (`days`, `limit`). |
+| `pr_list_merged` | Recently merged PRs since a date (`since`, `label`, `limit`). |
+| `pr_list_waiting_review` | Open PRs with passing CI needing review (`limit`). |
+| `pr_list_changed_files` | Changed files with +/- counts for one PR. |
+| `pr_get_status` | Mergeability snapshot: CI tally, external checks, review, draft. |
+| `pr_get_overview` | Single-call snapshot: status, files stats, failing run IDs. |
+| `pr_get_ci_snapshot` | CI_KIND + failing runs + compact digest per run (default 2). |
+| `pr_get_status_batch` | Batch CI/review lines for comma-separated PR numbers (GraphQL, max 15). |
+| `pr_get_overview_batch` | Lightweight multi-PR overview (GraphQL, max 5; no failing run IDs). |
+| `pr_get_merge_blockers` | Structured merge blockers list. |
+| `pr_list_merge_ready` | Open PRs ready to merge (CI green, approved, mergeable). |
+| `pr_list_merge_blocked` | CI green but still blocked (conflicts, review, etc.). |
+| `pr_draft_ci_comment` | Draft CI failure comment from fingerprint + policy. |
+| `pr_list_large` | Open PRs exceeding file/line thresholds (mega-PR hygiene). |
+| `pr_get_review_routing` | CODEOWNERS-based review routing for changed files. |
+| `pr_get_review_state` | Reviewers, latest reviews, inline comment snippets. |
+| `pr_diff_risk_scan` | Heuristic risk flags (lockfile, migration, workflow edits). |
+| `pr_get_diff` | Capped unified diff (`max_bytes`). |
+| `pr_post_comment` | Post a PR comment (mutating). |
+| `pr_create_backport` | Cherry-pick merged PR onto target branch and open backport PR (mutating). |
+| `backport_get_conflict_files` | List conflict files in backport workspace (`workspace_path`). |
+| `backport_suggest_resolution` | Conflict resolution hints from marker analysis (`workspace_path`, `max_files`). |
+| `pr_list_backport_candidates` | Merged PRs with `needs-backport` label (release-duty). |
+| `pr_is_docs_only` | Detect docs-only PR changes (scheduler hint). |
 
-Typical flow: `pr_get_status` to triage a PR, then `ci_analyze_pr_failures` → `ci_get_failed_logs`
-(real bug vs. flaky?) → `ci_rerun_workflow` if flaky. All tools take `repo` as `owner/repo`;
-`pr_create_backport` also needs `pr_number` and `target_branch` — it clones into a temporary
-workspace, so no local checkout is required.
+### CI (GitHub Actions)
+
+| Tool | Description |
+|------|-------------|
+| `ci_analyze_pr_failures` | Failing workflow runs for a PR; separates `action_required` from real failures; surfaces external checks. |
+| `ci_get_run_summary` | Compact run summary with failed jobs/steps before pulling logs. |
+| `ci_get_failed_logs` | Distilled failed-step logs with synopsis (job/step/test/FP). Optional `job_id`, `focus`. |
+| `ci_get_failure_digest` | Compact digest: verdict + FP + ~1KB excerpt. |
+| `ci_list_runs` | Recent workflow runs on a branch (`branch`, `limit`). Lines include duration when completed. |
+| `ci_branch_health` | Branch CI health rollup: failure rate, streak, last failure. |
+| `ci_workflow_stats` | Per-workflow failure rate and duration stats on a branch. |
+| `ci_failure_fingerprint` | Structured failure fingerprint (job, test, error sig) for flaky matching. |
+| `policy_classify_failure` | Rule-based failure class (test/infra/auth/timeout). |
+| `ci_compare_runs` | Compare two runs by fingerprint without full logs. |
+| `ci_correlate_prs` | Recently merged PRs before a failing run (regression-link). |
+| `ci_get_job_logs` | Distilled logs for one job (`job_id` from run summary). |
+| `ci_list_workflows` | Workflow names and IDs for the repository. |
+| `ci_list_external_checks` | External CI checks (Jenkins, etc.) on a PR — not GitHub Actions. |
+| `ci_get_check_url` | External check names with details URLs (open in browser, not Actions logs). |
+| `ci_rerun_workflow` | Rerun failed jobs of a run (mutating). |
+
+### Repository, issues, security
+
+| Tool | Description |
+|------|-------------|
+| `repo_get_info` | Default branch, visibility, language, license, topics, labels. |
+| `issue_list_open` | Open issues with compact summary (`limit`). |
+| `issue_get` | Issue title/body/labels. |
+| `issue_add_label` | Add label to an issue (mutating). |
+| `issue_search` | Search issues with GitHub query syntax (`query`, `limit`). |
+| `alert_list_open` | Open Dependabot alerts (`limit`). |
+| `alert_summarize_open` | Dependabot severity rollup (`limit`). |
+
+### Release
+
+| Tool | Description |
+|------|-------------|
+| `release_list_tags` | Recent git tags (newest first). |
+| `release_notes_draft` | Release-notes bullets from PRs merged since a tag. |
+
+### Notify
+
+| Tool | Description |
+|------|-------------|
+| `notify_post_slack` | Post compact Slack message via incoming webhook (`text`, optional `webhook_url` or `SLACK_WEBHOOK_URL`). mutating |
+
+### Events (HTTP mode)
+
+| Tool | Description |
+|------|-------------|
+| `event_list_recent` | Recent GitHub webhook events (`repo`, `kind` prefix, `limit`). Shared across stdio + HTTP via `~/.cache/unistar-mcp/events.jsonl` (override with `UNISTAR_MCP_EVENT_FILE`; set `off` for memory-only). |
+
+Configure GitHub to POST to `http://<host>:8080/hooks/github` when running `unistar-mcp http`. Optional env: `GITHUB_WEBHOOK_SECRET`.
+
+### Lazy mode meta-tools (`--lazy`)
+
+| Tool | Description |
+|------|-------------|
+| `tool_list` | Names + one-line summaries (with category tags). |
+| `tool_describe` | Full schema for one tool. |
+| `tool_call` | Execute any tool by name with JSON `args`. |
+
+Typical CI flow: `pr_get_overview` → `ci_analyze_pr_failures` → `ci_get_run_summary` →
+`ci_failure_fingerprint` → `policy_classify_failure` → `ci_get_failed_logs` → `ci_rerun_workflow`.
+Branch health: `ci_branch_health` or `ci_list_runs` on main.
+External CI (Jenkins, etc.) appears in status rollup — inspect the PR page; do not call
+`ci_get_failed_logs` for those checks.
+
+See [docs/TOOLS.md](docs/TOOLS.md) for the full parameter reference (SSOT).
+
+### MCP Resources
+
+Read-only PR overview snapshots via `resources/read` (when your MCP client supports Resources):
+
+| URI template | Content |
+|--------------|---------|
+| `github://pull/{owner}/{repo}/{number}/overview` | Same text as `pr_get_overview` |
+| `github://pull/{owner}/{repo}/{number}/blockers` | Same as `pr_get_merge_blockers` |
+| `github://pull/{owner}/{repo}/{number}/ci` | Failing Actions runs (`CI_KIND` + run list) |
+| `github://pull/{owner}/{repo}/{number}/ci-snapshot` | Same as `pr_get_ci_snapshot` |
+| `github://pull/{owner}/{repo}/{number}/review` | Same as `pr_get_review_state` |
+| `github://repo/{owner}/{repo}/branch/{branch}/ci-health` | Same as `ci_branch_health` |
+
+Example: `github://pull/acme/widget/42/overview`
 
 ## Requirements
 
@@ -70,10 +173,11 @@ unistar-mcp
 }
 ```
 
-**Streamable HTTP** — for remote/shared use; MCP endpoint at `/mcp`.
+**Streamable HTTP** — for remote/shared use; MCP endpoint at `/mcp`, GitHub webhooks at `/hooks/github`.
 
 ```sh
 unistar-mcp http --address :8080   # -a/--address, --debug
+# optional: GITHUB_WEBHOOK_SECRET=... for signed webhook payloads
 ```
 
 **Lazy loading** — `--lazy` exposes only three meta tools instead of every schema. See
@@ -194,4 +298,4 @@ the agent toward MCP tools instead of raw `gh`/`git` for PR/CI tasks.
 
 ## License
 
-[MIT](LICENSE) © 2026 STARRY-S
+[MIT](LICENSE) © 2026 Unistar contributors
